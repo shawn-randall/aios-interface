@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import nodemailer from "nodemailer";
+import { DAVClient } from "tsdav";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const REPO = "shawn-randall/AIS-OS";
@@ -205,7 +206,6 @@ async function listEvents(days = 7) {
   }
 
   try {
-    const { DAVClient } = await import("tsdav");
     const davClient = new DAVClient({
       serverUrl: "https://caldav.icloud.com",
       credentials: {
@@ -255,7 +255,6 @@ async function addEvent(title, date, time, durationMins = 60) {
   }
 
   try {
-    const { DAVClient } = await import("tsdav");
     const davClient = new DAVClient({
       serverUrl: "https://caldav.icloud.com",
       credentials: {
