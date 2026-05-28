@@ -122,6 +122,7 @@ async function readEmail(account, count = 5) {
         host: config.imap.host,
         port: config.imap.port,
         tls: config.imap.tls,
+        tlsOptions: { rejectUnauthorized: false },
         user: config.user,
         password: config.pass,
         authTimeout: 8000,
