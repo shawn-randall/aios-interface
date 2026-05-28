@@ -1,10 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
 import nodemailer from "nodemailer";
-import { createRequire } from "module";
-import { DAVClient } from "tsdav";
-
-const require = createRequire(import.meta.url);
-const imapSimple = require("imap-simple");
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const REPO = "shawn-randall/AIS-OS";
@@ -116,6 +111,9 @@ async function readEmail(account, count = 5) {
   if (!config) return `Unknown account: ${account}. Valid options: icloud, sar372, shawnalfred`;
   if (!config.user || !config.pass) return `Credentials not set for ${account}. Add env vars to Vercel: ${account === "icloud" ? "APPLE_ID, APPLE_APP_PASSWORD" : account === "sar372" ? "GMAIL_1_ADDRESS, GMAIL_1_PASSWORD" : "GMAIL_2_ADDRESS, GMAIL_2_PASSWORD"}`;
 
+  const imapMod = await import("imap-simple");
+  const imapSimple = imapMod.default || imapMod;
+
   const n = Math.min(count, 10);
   let connection;
   try {
@@ -206,6 +204,7 @@ async function listEvents(days = 7) {
   }
 
   try {
+    const { DAVClient } = await import("tsdav");
     const davClient = new DAVClient({
       serverUrl: "https://caldav.icloud.com",
       credentials: {
@@ -255,6 +254,7 @@ async function addEvent(title, date, time, durationMins = 60) {
   }
 
   try {
+    const { DAVClient } = await import("tsdav");
     const davClient = new DAVClient({
       serverUrl: "https://caldav.icloud.com",
       credentials: {
