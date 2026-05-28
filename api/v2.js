@@ -1,10 +1,48 @@
 import Anthropic from "@anthropic-ai/sdk";
+import nodemailer from "nodemailer";
+import { createRequire } from "module";
+import { DAVClient } from "tsdav";
+
+const require = createRequire(import.meta.url);
+const imapSimple = require("imap-simple");
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const REPO = "shawn-randall/AIS-OS";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const TODOIST_TOKEN = process.env.TODOIST_API_TOKEN;
 const TODOIST_BASE = "https://api.todoist.com/api/v1";
+
+// --- Email account configs ---
+
+const EMAIL_ACCOUNTS = {
+  icloud: {
+    label: "iCloud (symphonics@mac.com)",
+    address: "symphonics@mac.com",
+    imap: { host: "imap.mail.me.com", port: 993, tls: true },
+    smtp: { host: "smtp.mail.me.com", port: 587, secure: false },
+    user: process.env.APPLE_ID,
+    pass: process.env.APPLE_APP_PASSWORD,
+    sentFolder: "Sent Messages",
+  },
+  sar372: {
+    label: "Gmail (sar372@gmail.com)",
+    address: process.env.GMAIL_1_ADDRESS || "sar372@gmail.com",
+    imap: { host: "imap.gmail.com", port: 993, tls: true },
+    smtp: { host: "smtp.gmail.com", port: 587, secure: false },
+    user: process.env.GMAIL_1_ADDRESS,
+    pass: process.env.GMAIL_1_PASSWORD,
+    sentFolder: "[Gmail]/Sent Mail",
+  },
+  shawnalfred: {
+    label: "Gmail (shawnalfredrandall@gmail.com)",
+    address: process.env.GMAIL_2_ADDRESS || "shawnalfredrandall@gmail.com",
+    imap: { host: "imap.gmail.com", port: 993, tls: true },
+    smtp: { host: "smtp.gmail.com", port: 587, secure: false },
+    user: process.env.GMAIL_2_ADDRESS,
+    pass: process.env.GMAIL_2_PASSWORD,
+    sentFolder: "[Gmail]/Sent Mail",
+  },
+};
 
 // --- GitHub helpers ---
 
@@ -69,6 +107,199 @@ async function todoistPost(path, body = {}) {
   });
   if (!res.ok) return null;
   return res.json();
+}
+
+// --- Email helpers ---
+
+async function readEmail(account, count = 5) {
+  const config = EMAIL_ACCOUNTS[account];
+  if (!config) return `Unknown account: ${account}. Valid options: icloud, sar372, shawnalfred`;
+  if (!config.user || !config.pass) return `Credentials not set for ${account}. Add env vars to Vercel: ${account === "icloud" ? "APPLE_ID, APPLE_APP_PASSWORD" : account === "sar372" ? "GMAIL_1_ADDRESS, GMAIL_1_PASSWORD" : "GMAIL_2_ADDRESS, GMAIL_2_PASSWORD"}`;
+
+  const n = Math.min(count, 10);
+  let connection;
+  try {
+    connection = await imapSimple.connect({
+      imap: {
+        host: config.imap.host,
+        port: config.imap.port,
+        tls: config.imap.tls,
+        user: config.user,
+        password: config.pass,
+        authTimeout: 8000,
+        connTimeout: 8000,
+      },
+    });
+
+    await connection.openBox("INBOX");
+    const results = await connection.search(["ALL"], {
+      bodies: ["HEADER.FIELDS (FROM SUBJECT DATE)"],
+      struct: false,
+    });
+
+    const recent = results.slice(-n).reverse();
+    const lines = recent.map((item) => {
+      const part = item.parts[0];
+      const from = part?.body?.from?.[0] || "?";
+      const subject = part?.body?.subject?.[0] || "(no subject)";
+      const date = part?.body?.date?.[0] || "?";
+      return `Subject: ${subject}\nFrom: ${from}\nDate: ${date}`;
+    });
+
+    connection.end();
+    return lines.length
+      ? `${config.label} — ${lines.length} recent:\n\n${lines.join("\n\n---\n\n")}`
+      : "Inbox empty.";
+  } catch (err) {
+    if (connection) try { connection.end(); } catch (_) {}
+    return `Email read failed (${account}): ${err.message}`;
+  }
+}
+
+async function sendEmail(to, subject, body, fromAccount) {
+  const config = EMAIL_ACCOUNTS[fromAccount || "shawnalfred"];
+  if (!config.user || !config.pass) return `Credentials not set. Add email env vars to Vercel.`;
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: config.smtp.host,
+      port: config.smtp.port,
+      secure: config.smtp.secure,
+      auth: { user: config.user, pass: config.pass },
+    });
+
+    await transporter.sendMail({
+      from: `Shawn Randall <${config.address}>`,
+      to,
+      subject,
+      text: body,
+    });
+
+    return `Sent to ${to} from ${config.address}.`;
+  } catch (err) {
+    return `Send failed: ${err.message}`;
+  }
+}
+
+// --- Calendar helpers ---
+
+function parseICalDate(dtstart) {
+  const clean = dtstart.replace(/\s/g, "");
+  const m = clean.match(/(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2}))?/);
+  if (!m) return dtstart;
+  const [, yr, mo, dy, hr, mn] = m;
+  if (hr !== undefined) return `${mo}/${dy}/${yr} ${hr}:${mn}`;
+  return `${mo}/${dy}/${yr}`;
+}
+
+function iCalDateToTs(dtstart) {
+  const clean = dtstart.replace(/\s/g, "");
+  const m = clean.match(/(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2}))?/);
+  if (!m) return 0;
+  const [, yr, mo, dy, hr = "00", mn = "00", sc = "00"] = m;
+  return new Date(`${yr}-${mo}-${dy}T${hr}:${mn}:${sc}Z`).getTime();
+}
+
+async function listEvents(days = 7) {
+  if (!process.env.APPLE_ID || !process.env.APPLE_APP_PASSWORD) {
+    return "Calendar credentials not configured. Add APPLE_ID and APPLE_APP_PASSWORD to Vercel.";
+  }
+
+  try {
+    const davClient = new DAVClient({
+      serverUrl: "https://caldav.icloud.com",
+      credentials: {
+        username: process.env.APPLE_ID,
+        password: process.env.APPLE_APP_PASSWORD,
+      },
+      authMethod: "Basic",
+      defaultAccountType: "caldav",
+    });
+
+    await davClient.login();
+    const calendars = await davClient.fetchCalendars();
+
+    const now = new Date();
+    const end = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+    const events = [];
+
+    for (const cal of calendars.slice(0, 6)) {
+      try {
+        const objects = await davClient.fetchCalendarObjects({
+          calendar: cal,
+          timeRange: { start: now.toISOString(), end: end.toISOString() },
+        });
+        for (const obj of objects) {
+          const data = obj.data || "";
+          const summary = data.match(/SUMMARY:(.*)/)?.[1]?.trim() || "Event";
+          const dtstart = data.match(/DTSTART[^:]*:(.*)/)?.[1]?.trim() || "";
+          if (dtstart) {
+            events.push({ summary, display: parseICalDate(dtstart), ts: iCalDateToTs(dtstart) });
+          }
+        }
+      } catch (_) {}
+    }
+
+    events.sort((a, b) => a.ts - b.ts);
+
+    if (!events.length) return `No events in the next ${days} days.`;
+    return events.map((e) => `${e.display}  ${e.summary}`).join("\n");
+  } catch (err) {
+    return `Calendar fetch failed: ${err.message}`;
+  }
+}
+
+async function addEvent(title, date, time, durationMins = 60) {
+  if (!process.env.APPLE_ID || !process.env.APPLE_APP_PASSWORD) {
+    return "Calendar credentials not configured. Add APPLE_ID and APPLE_APP_PASSWORD to Vercel.";
+  }
+
+  try {
+    const davClient = new DAVClient({
+      serverUrl: "https://caldav.icloud.com",
+      credentials: {
+        username: process.env.APPLE_ID,
+        password: process.env.APPLE_APP_PASSWORD,
+      },
+      authMethod: "Basic",
+      defaultAccountType: "caldav",
+    });
+
+    await davClient.login();
+    const calendars = await davClient.fetchCalendars();
+    const defaultCal = calendars[0];
+    if (!defaultCal) return "No calendars found on iCloud account.";
+
+    const timeStr = time || "12:00";
+    const start = new Date(`${date}T${timeStr}:00`);
+    const end = new Date(start.getTime() + durationMins * 60000);
+    const fmt = (d) => d.toISOString().replace(/[-:.]/g, "").slice(0, 15) + "Z";
+    const uid = `aios-${Date.now()}@shawn`;
+
+    const vcal = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//AIOS//EN",
+      "BEGIN:VEVENT",
+      `UID:${uid}`,
+      `DTSTAMP:${fmt(new Date())}`,
+      `DTSTART:${fmt(start)}`,
+      `DTEND:${fmt(end)}`,
+      `SUMMARY:${title}`,
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\r\n");
+
+    await davClient.createCalendarObject({
+      calendar: defaultCal,
+      filename: `${uid}.ics`,
+      iCalString: vcal,
+    });
+
+    return `Added "${title}" on ${date} at ${timeStr} (${durationMins} min).`;
+  } catch (err) {
+    return `Calendar add failed: ${err.message}`;
+  }
 }
 
 // --- Tool definitions ---
@@ -146,6 +377,71 @@ const TOOLS = [
       required: ["task_id", "task_name"],
     },
   },
+  {
+    name: "read_email",
+    description: "Read recent emails from one of Shawn's inboxes. Call this when he asks to check email, see what's new, or read messages.",
+    input_schema: {
+      type: "object",
+      properties: {
+        account: {
+          type: "string",
+          enum: ["icloud", "sar372", "shawnalfred"],
+          description: "icloud=symphonics@mac.com, sar372=sar372@gmail.com, shawnalfred=shawnalfredrandall@gmail.com. Default to shawnalfred if unspecified.",
+        },
+        count: {
+          type: "integer",
+          description: "How many recent emails to fetch (default 5, max 10).",
+        },
+      },
+      required: ["account"],
+    },
+  },
+  {
+    name: "send_email",
+    description: "Send an email from one of Shawn's accounts. Always confirm recipient and subject before sending unless Shawn explicitly provides both.",
+    input_schema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Recipient email address" },
+        subject: { type: "string", description: "Email subject line" },
+        body: { type: "string", description: "Full email body text" },
+        from_account: {
+          type: "string",
+          enum: ["icloud", "sar372", "shawnalfred"],
+          description: "Which account to send from. Default: shawnalfred.",
+        },
+      },
+      required: ["to", "subject", "body"],
+    },
+  },
+  {
+    name: "list_events",
+    description: "List upcoming events from Shawn's iCloud calendar. Call this when he asks about his schedule, what's coming up, or what's on his calendar.",
+    input_schema: {
+      type: "object",
+      properties: {
+        days: {
+          type: "integer",
+          description: "How many days ahead to look (default 7).",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "add_event",
+    description: "Add a new event to Shawn's iCloud calendar.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Event title" },
+        date: { type: "string", description: "Date in YYYY-MM-DD format" },
+        time: { type: "string", description: "Start time in HH:MM (24-hour), e.g. '14:30'. Omit for all-day." },
+        duration_mins: { type: "integer", description: "Duration in minutes (default 60)." },
+      },
+      required: ["title", "date"],
+    },
+  },
 ];
 
 // --- Tool executor ---
@@ -180,6 +476,22 @@ async function executeTool(name, input, savedFiles) {
   if (name === "complete_task") {
     const res = await todoistPost(`/tasks/${input.task_id}/close`);
     return res !== null ? `Completed: "${input.task_name}"` : `Failed to complete task.`;
+  }
+
+  if (name === "read_email") {
+    return await readEmail(input.account, input.count || 5);
+  }
+
+  if (name === "send_email") {
+    return await sendEmail(input.to, input.subject, input.body, input.from_account);
+  }
+
+  if (name === "list_events") {
+    return await listEvents(input.days || 7);
+  }
+
+  if (name === "add_event") {
+    return await addEvent(input.title, input.date, input.time, input.duration_mins || 60);
   }
 
   return "Unknown tool.";
@@ -223,16 +535,22 @@ export default async function handler(req, res) {
 
 You are Shawn's AIOS running inside a Vercel serverless function.
 
-You have exactly 4 tools available. Use ONLY these tool names — no others exist here:
-1. add_task — call this to add a Todoist task
-2. list_tasks — call this to fetch Todoist tasks
-3. complete_task — call this to mark a task done
-4. save_context — call this to save a file to GitHub
+You have exactly 8 tools available. Use ONLY these tool names — no others exist here:
+1. add_task — add a Todoist task
+2. list_tasks — fetch Todoist tasks
+3. complete_task — mark a task done
+4. save_context — save a file to GitHub
+5. read_email — read recent emails from an inbox
+6. send_email — send an email from Shawn's account
+7. list_events — list upcoming calendar events
+8. add_event — add an event to the calendar
 
 NEVER output <tool_call> tags or code blocks. NEVER call mcp__* tools — they do not exist here.
 NEVER run Python or bash scripts — they cannot execute here.
-When Shawn asks to add a task: call add_task. That is all.
-When Shawn asks for tasks: call list_tasks. That is all.
+When Shawn asks to check email: call read_email immediately.
+When Shawn asks about his schedule/calendar: call list_events immediately.
+When Shawn asks to add a task: call add_task immediately.
+When Shawn asks to send an email: call send_email (confirm recipient + subject first if not given).
 
 ---
 
@@ -295,13 +613,11 @@ ${joshGroban}
 
 ---
 
-You are Shawn's AIOS, running inside a Vercel serverless function. You cannot run scripts or terminal commands — ignore any references to Python scripts in the context files above.
+You are Shawn's AIOS, running inside a Vercel serverless function. You cannot run scripts or terminal commands.
 
-Instead, you have built-in tools wired directly to live APIs:
-- list_tasks / add_task / complete_task → Todoist (live, use these now)
-- save_context → writes files back to GitHub
+Email accounts: icloud=symphonics@mac.com, sar372=sar372@gmail.com, shawnalfred=shawnalfredrandall@gmail.com.
+Calendar: iCloud (syncs with iPhone).
 
-When Shawn asks about tasks, call list_tasks immediately. Do not explain, do not apologize, just call the tool and return the result.
 Keep responses concise — he's on his phone. Lead with action. No fluff.
 Today's date: ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}.`;
 

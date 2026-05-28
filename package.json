@@ -4,7 +4,11 @@
   "description": "AIOS chat interface",
   "private": true,
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0"
+    "@anthropic-ai/sdk": "^0.39.0",
+    "imap-simple": "^5.1.0",
+    "node-ical": "^0.26.1",
+    "nodemailer": "^8.0.9",
+    "tsdav": "^2.2.2"
   },
   "engines": {
     "node": ">=18"
