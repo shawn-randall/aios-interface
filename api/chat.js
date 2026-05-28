@@ -91,6 +91,7 @@ const TOOLS = [
             "projects/skool-community.md",
             "projects/problem-collection-app.md",
             "projects/aios-interface.md",
+            "projects/josh-groban.md",
           ],
         },
         content: { type: "string", description: "Complete new file content" },
@@ -200,7 +201,7 @@ export default async function handler(req, res) {
   const [
     claudeMd, connections, priorities, aboutMe, aboutBusiness,
     decisionsLog, sessionLog, ghostNotes, gmailCleaner, sofiReferral,
-    skoolCommunity, problemApp, aiosInterface,
+    skoolCommunity, problemApp, aiosInterface, joshGroban,
   ] = await Promise.all([
     fetchContext("CLAUDE.md"),
     fetchContext("connections.md"),
@@ -215,6 +216,7 @@ export default async function handler(req, res) {
     fetchContext("projects/skool-community.md"),
     fetchContext("projects/problem-collection-app.md"),
     fetchContext("projects/aios-interface.md"),
+    fetchContext("projects/josh-groban.md"),
   ]);
 
   const systemPrompt = `${claudeMd}
@@ -270,6 +272,9 @@ ${problemApp}
 
 ### AIOS Interface
 ${aiosInterface}
+
+### Josh Groban Performances
+${joshGroban}
 
 ---
 
