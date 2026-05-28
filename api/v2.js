@@ -672,6 +672,15 @@ ${sessionLog}`;
     return res.status(200).json({ reply, saved: savedFiles, toolsCalled });
   } catch (err) {
     console.error("Claude API error:", err);
+    const msg = err.message?.toLowerCase() || "";
+    const isCredits = err.status === 402 || msg.includes("credit") || msg.includes("billing") || msg.includes("quota") || msg.includes("balance");
+    if (isCredits) {
+      return res.status(200).json({
+        reply: "⚠️ Out of API credits. Go to console.anthropic.com → Billing to add more. Everything else (tasks, email send) still works once credits are topped up.",
+        saved: [],
+        toolsCalled: [],
+      });
+    }
     return res.status(500).json({ error: "Failed to get response from Claude" });
   }
 }
