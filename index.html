@@ -245,8 +245,11 @@
 
       if (data.reply) {
         let display = data.reply;
-        if (data.saved && data.saved.length > 0) {
-          display += "\n\n↑ Saved to GitHub";
+        if (data.saved && data.saved.length > 0) display += "\n\n↑ Saved to GitHub";
+        if (data.toolsCalled && data.toolsCalled.length > 0) {
+          display += `\n\n_tools: ${data.toolsCalled.join(", ")}_`;
+        } else if (data.toolsCalled && data.toolsCalled.length === 0) {
+          display += "\n\n_tools: none called_";
         }
         addMessage("assistant", display);
         history.push({ role: "user", content: text });

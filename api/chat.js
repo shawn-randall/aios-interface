@@ -173,8 +173,8 @@ async function executeTool(name, input, savedFiles) {
     if (input.due_string) body.due_string = input.due_string;
     if (input.priority) body.priority = input.priority;
     const task = await todoistPost("/tasks", body);
-    if (!task) return "Failed to add task.";
-    return `Added: "${task.content}"${task.due ? ` due ${task.due.string}` : ""} (ID: ${task.id})`;
+    if (!task) return "TODOIST_ERROR: Task was NOT added. The API call failed — token may be missing in Vercel. Tell the user: task was not added, there is a configuration issue.";
+    return `TODOIST_SUCCESS: Task added with ID ${task.id}. Content: "${task.content}"${task.due ? ` due ${task.due.string}` : ""}.`;
   }
 
   if (name === "complete_task") {
@@ -303,16 +303,17 @@ Today's date: ${new Date().toLocaleDateString("en-US", { weekday: "long", year: 
     });
 
     const savedFiles = [];
+    const toolsCalled = [];
 
     while (response.stop_reason === "tool_use") {
       const toolBlocks = response.content.filter((b) => b.type === "tool_use");
 
       const toolResults = await Promise.all(
-        toolBlocks.map(async (block) => ({
-          type: "tool_result",
-          tool_use_id: block.id,
-          content: await executeTool(block.name, block.input, savedFiles),
-        }))
+        toolBlocks.map(async (block) => {
+          toolsCalled.push(block.name);
+          const content = await executeTool(block.name, block.input, savedFiles);
+          return { type: "tool_result", tool_use_id: block.id, content };
+        })
       );
 
       messages.push({ role: "assistant", content: response.content });
@@ -330,7 +331,7 @@ Today's date: ${new Date().toLocaleDateString("en-US", { weekday: "long", year: 
     const textBlock = response.content.find((b) => b.type === "text");
     const reply = textBlock ? textBlock.text : "Done.";
 
-    return res.status(200).json({ reply, saved: savedFiles });
+    return res.status(200).json({ reply, saved: savedFiles, toolsCalled });
   } catch (err) {
     console.error("Claude API error:", err);
     return res.status(500).json({ error: "Failed to get response from Claude" });
