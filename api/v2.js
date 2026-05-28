@@ -532,7 +532,7 @@ export default async function handler(req, res) {
     fetchContext("projects/josh-groban.md"),
   ]);
 
-  const systemPrompt = `## CRITICAL OPERATING INSTRUCTIONS
+  const staticPrompt = `## CRITICAL OPERATING INSTRUCTIONS
 
 You are Shawn's AIOS running inside a Vercel serverless function.
 
@@ -584,11 +584,6 @@ ${decisionsLog}
 
 ---
 
-## Recent Session Log
-${sessionLog}
-
----
-
 ## Active Projects
 
 ### Ghost Notes From Brooklyn
@@ -619,8 +614,17 @@ You are Shawn's AIOS, running inside a Vercel serverless function. You cannot ru
 Email accounts: icloud=symphonics@mac.com, sar372=sar372@gmail.com, shawnalfred=shawnalfredrandall@gmail.com.
 Calendar: iCloud (syncs with iPhone).
 
-Keep responses concise — he's on his phone. Lead with action. No fluff.
-Today's date: ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}.`;
+Keep responses concise — he's on his phone. Lead with action. No fluff.`;
+
+  const dynamicPrompt = `Today's date: ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}.
+
+## Recent Session Log
+${sessionLog}`;
+
+  const cachedSystem = [
+    { type: "text", text: staticPrompt, cache_control: { type: "ephemeral" } },
+    { type: "text", text: dynamicPrompt },
+  ];
 
   const messages = [
     ...history.map((h) => ({ role: h.role, content: h.content })),
@@ -631,7 +635,7 @@ Today's date: ${new Date().toLocaleDateString("en-US", { weekday: "long", year: 
     let response = await client.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 1024,
-      system: systemPrompt,
+      system: cachedSystem,
       tools: TOOLS,
       messages,
     });
@@ -656,7 +660,7 @@ Today's date: ${new Date().toLocaleDateString("en-US", { weekday: "long", year: 
       response = await client.messages.create({
         model: "claude-sonnet-4-6",
         max_tokens: 1024,
-        system: systemPrompt,
+        system: cachedSystem,
         tools: TOOLS,
         messages,
       });
