@@ -267,14 +267,30 @@ async function addEvent(title, date, time, durationMins = 60) {
 
     await davClient.login();
     const calendars = await davClient.fetchCalendars();
-    const defaultCal = calendars[0];
-    if (!defaultCal) return "No calendars found on iCloud account.";
+    if (!calendars.length) return "No calendars found on iCloud account.";
+
+    // Prefer a personal calendar over project/group calendars
+    const PREFERRED = ["home", "personal", "calendar", "shawn"];
+    const defaultCal = calendars.find((c) => {
+      const name = (c.displayName || "").toLowerCase();
+      return PREFERRED.some((p) => name.includes(p));
+    }) || calendars.find((c) => !(c.displayName || "").toLowerCase().includes("ensemble")) || calendars[0];
 
     const timeStr = time || "12:00";
-    const start = new Date(`${date}T${timeStr}:00`);
-    const end = new Date(start.getTime() + durationMins * 60000);
-    const fmt = (d) => d.toISOString().replace(/[-:.]/g, "").slice(0, 15) + "Z";
+    // Use floating datetime (no Z) so iCloud displays in local time, not UTC
+    const fmtLocal = (dateStr, timeStr) => {
+      const [yr, mo, dy] = dateStr.split("-");
+      const [hr, mn] = timeStr.split(":");
+      return `${yr}${mo}${dy}T${hr}${mn}00`;
+    };
+    const [startHr, startMn] = timeStr.split(":").map(Number);
+    const totalMins = startHr * 60 + startMn + durationMins;
+    const endHr = String(Math.floor(totalMins / 60) % 24).padStart(2, "0");
+    const endMn = String(totalMins % 60).padStart(2, "0");
+    const endTimeStr = `${endHr}:${endMn}`;
+
     const uid = `aios-${Date.now()}@shawn`;
+    const nowUtc = new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15) + "Z";
 
     const vcal = [
       "BEGIN:VCALENDAR",
@@ -282,9 +298,9 @@ async function addEvent(title, date, time, durationMins = 60) {
       "PRODID:-//AIOS//EN",
       "BEGIN:VEVENT",
       `UID:${uid}`,
-      `DTSTAMP:${fmt(new Date())}`,
-      `DTSTART:${fmt(start)}`,
-      `DTEND:${fmt(end)}`,
+      `DTSTAMP:${nowUtc}`,
+      `DTSTART;TZID=America/New_York:${fmtLocal(date, timeStr)}`,
+      `DTEND;TZID=America/New_York:${fmtLocal(date, endTimeStr)}`,
       `SUMMARY:${title}`,
       "END:VEVENT",
       "END:VCALENDAR",
