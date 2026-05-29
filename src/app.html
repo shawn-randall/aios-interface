@@ -191,6 +191,16 @@
   const inputEl    = document.getElementById("input");
   const sendBtn    = document.getElementById("send-btn");
 
+  // Auto-reload after 30 min of inactivity — ensures fresh code + fresh context
+  const INACTIVITY_MS = 30 * 60 * 1000;
+  let inactivityTimer = setTimeout(() => location.reload(), INACTIVITY_MS);
+  function resetInactivityTimer() {
+    clearTimeout(inactivityTimer);
+    inactivityTimer = setTimeout(() => location.reload(), INACTIVITY_MS);
+  }
+  document.addEventListener("touchstart", resetInactivityTimer);
+  document.addEventListener("keydown", resetInactivityTimer);
+
   inputEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
