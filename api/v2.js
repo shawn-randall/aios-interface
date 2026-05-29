@@ -530,11 +530,12 @@ export default async function handler(req, res) {
   if (!message) return res.status(400).json({ error: "No message provided" });
 
   const [
-    claudeMd, connections, priorities, aboutMe, aboutBusiness,
+    claudeMd, phoneInstructions, connections, priorities, aboutMe, aboutBusiness,
     decisionsLog, sessionLog, ghostNotes, gmailCleaner, sofiReferral,
     skoolCommunity, problemApp, aiosInterface, joshGroban,
   ] = await Promise.all([
     fetchContext("CLAUDE.md"),
+    fetchContext("context/phone-instructions.md"),
     fetchContext("connections.md"),
     fetchContext("context/priorities.md"),
     fetchContext("context/about-me.md"),
@@ -550,26 +551,9 @@ export default async function handler(req, res) {
     fetchContext("projects/josh-groban.md"),
   ]);
 
-  const staticPrompt = `## CRITICAL OPERATING INSTRUCTIONS
+  const staticPrompt = `## PHONE INTERFACE OPERATING INSTRUCTIONS
 
-You are Shawn's AIOS running inside a Vercel serverless function.
-
-You have exactly 8 tools available. Use ONLY these tool names — no others exist here:
-1. add_task — add a Todoist task
-2. list_tasks — fetch Todoist tasks
-3. complete_task — mark a task done
-4. save_context — save a file to GitHub
-5. read_email — read recent emails from an inbox
-6. send_email — send an email from Shawn's account
-7. list_events — list upcoming calendar events
-8. add_event — add an event to the calendar
-
-NEVER output <tool_call> tags or code blocks. NEVER call mcp__* tools — they do not exist here.
-NEVER run Python or bash scripts — they cannot execute here.
-When Shawn asks to check email: call read_email immediately.
-When Shawn asks about his schedule/calendar: call list_events immediately.
-When Shawn asks to add a task: call add_task immediately.
-When Shawn asks to send an email: NEVER call send_email immediately. Always write the full draft first, show it to Shawn, and wait for explicit approval ("send it", "yes", "go ahead") before calling send_email. No exceptions. This matches the Mac AIOS guardrail.
+${phoneInstructions}
 
 ---
 
@@ -627,12 +611,7 @@ ${joshGroban}
 
 ---
 
-You are Shawn's AIOS, running inside a Vercel serverless function. You cannot run scripts or terminal commands.
-
-Email accounts: icloud=symphonics@mac.com, sar372=sar372@gmail.com, shawnalfred=shawnalfredrandall@gmail.com.
-Calendar: iCloud (syncs with iPhone).
-
-Keep responses concise — he's on his phone. Lead with action. No fluff.`;
+You are Shawn's AIOS, running inside a Vercel serverless function. You cannot run scripts or terminal commands.`;
 
   const dynamicPrompt = `Today's date: ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}.
 
