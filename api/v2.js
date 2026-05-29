@@ -499,6 +499,9 @@ async function executeTool(name, input, savedFiles) {
   }
 
   if (name === "send_email") {
+    if (!input.subject || !input.subject.trim()) return "SEND_BLOCKED: No subject line. Ask Shawn for a subject before sending.";
+    if (!input.to || !input.to.trim()) return "SEND_BLOCKED: No recipient. Ask Shawn who to send to.";
+    if (!input.body || !input.body.trim()) return "SEND_BLOCKED: No body. Draft the email content first.";
     return await sendEmail(input.to, input.subject, input.body, input.from_account);
   }
 
