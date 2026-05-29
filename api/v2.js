@@ -530,13 +530,14 @@ export default async function handler(req, res) {
   if (!message) return res.status(400).json({ error: "No message provided" });
 
   const [
-    claudeMd, phoneInstructions, connections, priorities, aboutMe, aboutBusiness,
+    claudeMd, phoneInstructions, version, connections, priorities, aboutMe, aboutBusiness,
     decisionsLog, sessionLog, actorBio, pendingEmails,
     ghostNotes, gmailCleaner, sofiReferral,
     skoolCommunity, problemApp, aiosInterface, joshGroban,
   ] = await Promise.all([
     fetchContext("CLAUDE.md"),
     fetchContext("context/phone-instructions.md"),
+    fetchContext("context/version.md"),
     fetchContext("connections.md"),
     fetchContext("context/priorities.md"),
     fetchContext("context/about-me.md"),
@@ -557,6 +558,10 @@ export default async function handler(req, res) {
   const staticPrompt = `## PHONE INTERFACE OPERATING INSTRUCTIONS
 
 ${phoneInstructions}
+
+---
+
+${version}
 
 ---
 
