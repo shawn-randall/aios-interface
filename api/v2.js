@@ -531,7 +531,8 @@ export default async function handler(req, res) {
 
   const [
     claudeMd, phoneInstructions, connections, priorities, aboutMe, aboutBusiness,
-    decisionsLog, sessionLog, ghostNotes, gmailCleaner, sofiReferral,
+    decisionsLog, sessionLog, actorBio, pendingEmails,
+    ghostNotes, gmailCleaner, sofiReferral,
     skoolCommunity, problemApp, aiosInterface, joshGroban,
   ] = await Promise.all([
     fetchContext("CLAUDE.md"),
@@ -542,6 +543,8 @@ export default async function handler(req, res) {
     fetchContext("context/about-business.md"),
     fetchContext("decisions/log.md"),
     fetchContext("context/session-log.md"),
+    fetchContext("context/actor-bio.md"),
+    fetchContext("drafts/pending-email-responses.md"),
     fetchContext("projects/ghost-notes.md"),
     fetchContext("projects/gmail-cleaner.md"),
     fetchContext("projects/sofi-referral.md"),
@@ -583,6 +586,16 @@ ${priorities}
 
 ## Decisions Log
 ${decisionsLog}
+
+---
+
+## Actor Bio
+${actorBio}
+
+---
+
+## Pending Email Responses
+${pendingEmails}
 
 ---
 
