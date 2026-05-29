@@ -534,6 +534,7 @@ export default async function handler(req, res) {
     decisionsLog, sessionLog, actorBio, pendingEmails,
     ghostNotes, gmailCleaner, sofiReferral,
     skoolCommunity, problemApp, aiosInterface, joshGroban,
+    patreon, labIntensive,
   ] = await Promise.all([
     fetchContext("CLAUDE.md"),
     fetchContext("context/phone-instructions.md"),
@@ -553,6 +554,8 @@ export default async function handler(req, res) {
     fetchContext("projects/problem-collection-app.md"),
     fetchContext("projects/aios-interface.md"),
     fetchContext("projects/josh-groban.md"),
+    fetchContext("projects/patreon.md"),
+    fetchContext("projects/lab-intensive.md"),
   ]);
 
   const staticPrompt = `## PHONE INTERFACE OPERATING INSTRUCTIONS
@@ -626,6 +629,12 @@ ${aiosInterface}
 
 ### Josh Groban Performances
 ${joshGroban}
+
+### Patreon (Revenue)
+${patreon}
+
+### LAB Intensive Ensemble Teaching Project 2026
+${labIntensive}
 
 ---
 
