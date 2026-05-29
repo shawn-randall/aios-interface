@@ -566,7 +566,7 @@ NEVER run Python or bash scripts — they cannot execute here.
 When Shawn asks to check email: call read_email immediately.
 When Shawn asks about his schedule/calendar: call list_events immediately.
 When Shawn asks to add a task: call add_task immediately.
-When Shawn asks to send an email: call send_email (confirm recipient + subject first if not given).
+When Shawn asks to send an email: NEVER call send_email immediately. Always write the full draft first, show it to Shawn, and wait for explicit approval ("send it", "yes", "go ahead") before calling send_email. No exceptions. This matches the Mac AIOS guardrail.
 
 ---
 
