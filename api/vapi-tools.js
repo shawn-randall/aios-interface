@@ -87,13 +87,24 @@ const TOOLS = {
   },
 
   list_tasks: async (args) => {
-    const data = await todoistGet("/tasks", args.filter ? { filter: args.filter } : {});
+    const data = await todoistGet("/tasks");
     if (!data) return "Sorry, I couldn't reach your task list right now.";
-    const tasks = data.results ?? data;
-    if (!tasks.length) return "You have no tasks on that list. You're clear.";
+    let tasks = data.results ?? data;
+    const scope = (args.scope || "today").toLowerCase();
+    if (scope !== "all") {
+      // today + overdue = anything due today or earlier (client-side, reliable)
+      const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+      tasks = tasks.filter((t) => t.due && t.due.date && t.due.date <= today);
+    }
+    if (!tasks.length) {
+      return scope === "all"
+        ? "You have no active tasks. You're clear."
+        : "Nothing due today or overdue. You're all caught up.";
+    }
     const top = tasks.slice(0, 8).map((t) => t.content + (t.due ? ` (due ${t.due.string})` : ""));
-    const more = tasks.length > 8 ? ` And ${tasks.length - 8} more.` : "";
-    return `You have ${tasks.length} task${tasks.length === 1 ? "" : "s"}: ${top.join("; ")}.${more}`;
+    const more = tasks.length > 8 ? ` Plus ${tasks.length - 8} more.` : "";
+    const label = scope === "all" ? "active task" : "due or overdue";
+    return `You have ${tasks.length} ${label}${tasks.length === 1 ? "" : "s"}: ${top.join("; ")}.${more}`;
   },
 
   add_event: async (args) => {
