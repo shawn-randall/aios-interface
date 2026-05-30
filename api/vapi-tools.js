@@ -40,6 +40,15 @@ async function todoistGet(path, params = {}) {
   return res.json();
 }
 
+// Close a task. Todoist returns 204 No Content (empty body) — check res.ok, don't parse JSON.
+async function todoistClose(id) {
+  const res = await fetch(`${TODOIST_BASE}/tasks/${id}/close`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${TODOIST_TOKEN}` },
+  });
+  return res.ok;
+}
+
 // Resolve a spoken date/time phrase ("next Friday at 4pm", "tomorrow", "June 6 at noon")
 // to { date: 'YYYY-MM-DD', time: 'HH:MM' | null } using the SERVER's current date
 // (America/New_York). Keeps date math out of the LLM — no hallucinated dates.
@@ -159,7 +168,10 @@ async function caldavListEvents(days = 7) {
         if (!m) continue;
         const [, y, mo, d, h, mi] = m;
         const ts = new Date(`${y}-${mo}-${d}T${h || "00"}:${mi || "00"}:00`).getTime();
-        const label = h ? `${mo}/${d} at ${((+h % 12) || 12)}${+h >= 12 ? "pm" : "am"}` : `${mo}/${d}`;
+        // Weekday + month name computed server-side (TZ-safe) so the model never guesses the day.
+        const dayName = new Date(`${y}-${mo}-${d}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" });
+        const timeLabel = h ? ` at ${((+h % 12) || 12)}${mi && mi !== "00" ? ":" + mi : ""}${+h >= 12 ? "pm" : "am"}` : "";
+        const label = dayName + timeLabel;
         events.push({ ts, summary, label });
       }
     } catch (_) {}
@@ -250,15 +262,19 @@ const TOOLS = {
     const data = await todoistGet("/tasks");
     if (!data) return "Sorry, I couldn't reach your task list.";
     const tasks = data.results ?? data;
-    // Best match: exact-ish contains, else word overlap
-    let match = tasks.find((t) => t.content.toLowerCase().includes(q));
-    if (!match) {
+    // All tasks whose content contains the phrase (catches duplicates); fall back to word overlap.
+    let matches = tasks.filter((t) => t.content.toLowerCase().includes(q));
+    if (!matches.length) {
       const words = q.split(/\s+/).filter((w) => w.length > 2);
-      match = tasks.find((t) => words.some((w) => t.content.toLowerCase().includes(w)));
+      const m = tasks.find((t) => words.some((w) => t.content.toLowerCase().includes(w)));
+      if (m) matches = [m];
     }
-    if (!match) return `I couldn't find a task matching "${args.task_name}".`;
-    const ok = await todoistPost(`/tasks/${match.id}/close`);
-    return ok !== null ? `Done — marked "${match.content}" complete.` : "Sorry, I couldn't mark that complete.";
+    if (!matches.length) return `I couldn't find a task matching "${args.task_name}".`;
+    let done = 0;
+    for (const m of matches) { if (await todoistClose(m.id)) done++; }
+    if (done === 0) return "Sorry, I couldn't mark that complete.";
+    if (matches.length > 1) return `Done — there were ${matches.length} tasks matching that, and I marked all ${done} complete.`;
+    return `Done — marked "${matches[0].content}" complete.`;
   },
 
   get_schedule: async (args) => {
@@ -279,7 +295,7 @@ const TOOLS = {
     if (!note) return "What should I note down?";
     try {
       const ok = await githubAppendNote(note);
-      return ok ? "Got it — noted." : "Sorry, I couldn't save that note.";
+      return ok ? "Got it — saved to your AIOS notes." : "Sorry, I couldn't save that note.";
     } catch (e) {
       return "Sorry, something went wrong saving that note.";
     }
