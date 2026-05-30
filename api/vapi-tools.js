@@ -1,0 +1,89 @@
+// ── Vapi Tools channel adapter ─────────────────────────────────────────────
+// A thin CHANNEL adapter (per architecture-principles.md): translates Vapi's
+// tool-call webhook format into AIOS connector calls and back. The voice agent
+// (Vapi) is the channel + orchestrator; this exposes AIOS capabilities as tools.
+//
+// Add a capability = add one entry to TOOLS below. Each is a self-contained
+// connector. Keep this file free of Vapi-specific business logic beyond parsing.
+
+const TODOIST_TOKEN = process.env.TODOIST_API_TOKEN;
+const TODOIST_BASE = "https://api.todoist.com/api/v1";
+
+// Owner identity (caller number) — env, never hardcoded in a committed value.
+// Used for the role layer; for now we capture it and default to owner-lite.
+const OWNER_NUMBERS = (process.env.AIOS_OWNER_NUMBERS || "").split(",").map((s) => s.trim()).filter(Boolean);
+
+// ── Connectors (reused AIOS logic) ─────────────────────────────────────────
+
+async function todoistPost(path, body = {}) {
+  const res = await fetch(`${TODOIST_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${TODOIST_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+// ── Tool registry ──────────────────────────────────────────────────────────
+// name → async (args, ctx) => string (a short, voice-friendly result line)
+
+const TOOLS = {
+  add_task: async (args) => {
+    const content = (args.content || "").trim();
+    if (!content) return "I didn't catch the task. What should it say?";
+    const body = { content };
+    if (args.due_string) body.due_string = args.due_string;
+    if (args.priority) body.priority = args.priority;
+    const task = await todoistPost("/tasks", body);
+    if (!task) return "Sorry, I couldn't add that task — there was a problem reaching Todoist.";
+    return `Done. Added "${task.content}"${task.due ? ` due ${task.due.string}` : ""}.`;
+  },
+};
+
+// ── Handler ────────────────────────────────────────────────────────────────
+
+export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  const msg = req.body?.message || {};
+  // Vapi has used both keys across versions — handle both.
+  const calls = msg.toolCallList || msg.toolCalls || msg.toolCallsList || [];
+
+  // Capture caller identity for the role layer (charter: build it in from line one).
+  const callerNumber = msg.call?.customer?.number || msg.customer?.number || null;
+  const role = callerNumber && OWNER_NUMBERS.includes(callerNumber) ? "owner" : "owner"; // TODO: guest default once role layer lands
+  const ctx = { callerNumber, role };
+
+  const results = [];
+  for (const call of calls) {
+    const id = call.id || call.toolCallId;
+    const fn = call.function || call;
+    const name = fn.name;
+    let args = fn.arguments ?? {};
+    if (typeof args === "string") {
+      try { args = JSON.parse(args); } catch { args = {}; }
+    }
+
+    let result;
+    if (TOOLS[name]) {
+      try {
+        result = await TOOLS[name](args, ctx);
+      } catch (e) {
+        result = "Sorry, something went wrong running that.";
+      }
+    } else {
+      result = `Unknown tool: ${name}`;
+    }
+    results.push({ toolCallId: id, result });
+  }
+
+  return res.status(200).json({ results });
+}
