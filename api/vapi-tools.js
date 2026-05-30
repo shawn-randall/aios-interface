@@ -149,8 +149,11 @@ async function caldavListEvents(days = 7) {
     try {
       const objs = await davClient.fetchCalendarObjects({ calendar: cal, timeRange: { start: now.toISOString(), end: end.toISOString() } });
       for (const o of objs) {
-        const data = o.data || "";
-        const summary = (data.match(/SUMMARY:(.*)/) || [])[1]?.trim() || "Event";
+        // Unfold iCal wrapped lines (CRLF + space/tab) before parsing.
+        const data = (o.data || "").replace(/\r\n[ \t]/g, "").replace(/\n[ \t]/g, "");
+        let summary = (data.match(/SUMMARY:(.*)/) || [])[1]?.trim() || "Event";
+        // Unescape iCal text: \, \; \\ \n
+        summary = summary.replace(/\\,/g, ",").replace(/\\;/g, ";").replace(/\\n/gi, " ").replace(/\\\\/g, "\\");
         const dt = (data.match(/DTSTART[^:]*:(.*)/) || [])[1]?.trim() || "";
         const m = dt.replace(/\s/g, "").match(/(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2}))?/);
         if (!m) continue;
