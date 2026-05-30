@@ -15,6 +15,7 @@
 
 import { DAVClient } from "tsdav";
 import * as chrono from "chrono-node";
+import nodemailer from "nodemailer";
 
 // ── Env / config ────────────────────────────────────────────────────────────
 const TODOIST_TOKEN = process.env.TODOIST_API_TOKEN;
@@ -24,6 +25,28 @@ const REPO = "shawn-randall/AIS-OS";
 const APPLE_ID = process.env.APPLE_ID;
 const APPLE_APP_PASSWORD = process.env.APPLE_APP_PASSWORD;
 const CALENDAR_TZ = "America/New_York";
+
+// Email accounts — one config used by every channel.
+export const EMAIL_ACCOUNTS = {
+  icloud: {
+    label: "iCloud (symphonics@mac.com)", address: "symphonics@mac.com",
+    imap: { host: "imap.mail.me.com", port: 993, tls: true },
+    smtp: { host: "smtp.mail.me.com", port: 587, secure: false },
+    user: APPLE_ID, pass: APPLE_APP_PASSWORD, sentFolder: "Sent Messages",
+  },
+  sar372: {
+    label: "Gmail (sar372@gmail.com)", address: process.env.GMAIL_1_ADDRESS || "sar372@gmail.com",
+    imap: { host: "imap.gmail.com", port: 993, tls: true },
+    smtp: { host: "smtp.gmail.com", port: 587, secure: false },
+    user: process.env.GMAIL_1_ADDRESS, pass: process.env.GMAIL_1_PASSWORD, sentFolder: "[Gmail]/Sent Mail",
+  },
+  shawnalfred: {
+    label: "Gmail (shawnalfredrandall@gmail.com)", address: process.env.GMAIL_2_ADDRESS || "shawnalfredrandall@gmail.com",
+    imap: { host: "imap.gmail.com", port: 993, tls: true },
+    smtp: { host: "smtp.gmail.com", port: 587, secure: false },
+    user: process.env.GMAIL_2_ADDRESS, pass: process.env.GMAIL_2_PASSWORD, sentFolder: "[Gmail]/Sent Mail",
+  },
+};
 
 const pad = (n) => String(n).padStart(2, "0");
 
@@ -233,4 +256,59 @@ export async function saveNote({ note } = {}) {
   if (sha) body.sha = sha;
   const res = await fetch(url, { method: "PUT", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
   return res.ok ? { ok: true, message: "Saved to your AIOS notes." } : { ok: false, message: "I couldn't save that note." };
+}
+
+// ── Email ───────────────────────────────────────────────────────────────────
+
+export async function readEmail({ account, count = 5 } = {}) {
+  const config = EMAIL_ACCOUNTS[account];
+  if (!config) return { ok: false, message: `Unknown account: ${account}. Options: icloud, sar372, shawnalfred.` };
+  if (!config.user || !config.pass) return { ok: false, message: `Credentials not set for ${account}.` };
+  const imapMod = await import("imap-simple");
+  const imapSimple = imapMod.default || imapMod;
+  const n = Math.min(count, 10);
+  let connection;
+  try {
+    connection = await imapSimple.connect({
+      imap: {
+        host: config.imap.host, port: config.imap.port, tls: config.imap.tls,
+        tlsOptions: { rejectUnauthorized: false },
+        user: config.user, password: config.pass, authTimeout: 8000, connTimeout: 8000,
+      },
+    });
+    await connection.openBox("INBOX");
+    const results = await connection.search(["ALL"], { bodies: ["HEADER.FIELDS (FROM SUBJECT DATE)"], struct: false });
+    const recent = results.slice(-n).reverse();
+    const items = recent.map((item) => {
+      const p = item.parts[0];
+      return { from: p?.body?.from?.[0] || "?", subject: p?.body?.subject?.[0] || "(no subject)", date: p?.body?.date?.[0] || "?" };
+    });
+    connection.end();
+    if (!items.length) return { ok: true, data: [], message: "Inbox empty." };
+    const lines = items.map((e) => `Subject: ${e.subject}\nFrom: ${e.from}\nDate: ${e.date}`);
+    return { ok: true, data: items, message: `${config.label} — ${items.length} recent:\n\n${lines.join("\n\n---\n\n")}` };
+  } catch (err) {
+    if (connection) try { connection.end(); } catch (_) {}
+    return { ok: false, message: `Email read failed (${account}): ${err.message}` };
+  }
+}
+
+// Send guardrail (enforced at the connector — applies to EVERY channel):
+// all of to/subject/body must be present. Channels/prompts still draft-and-confirm first.
+export async function sendEmail({ to, subject, body, from_account } = {}) {
+  if (!to || !to.trim()) return { ok: false, message: "SEND_BLOCKED: No recipient. Ask Shawn who to send to." };
+  if (!subject || !subject.trim()) return { ok: false, message: "SEND_BLOCKED: No subject line. Ask Shawn for a subject." };
+  if (!body || !body.trim()) return { ok: false, message: "SEND_BLOCKED: No body. Draft the email content first." };
+  const config = EMAIL_ACCOUNTS[from_account || "shawnalfred"];
+  if (!config || !config.user || !config.pass) return { ok: false, message: "Email credentials not set." };
+  try {
+    const transporter = nodemailer.createTransport({
+      host: config.smtp.host, port: config.smtp.port, secure: config.smtp.secure,
+      auth: { user: config.user, pass: config.pass },
+    });
+    await transporter.sendMail({ from: `Shawn Randall <${config.address}>`, to, subject, text: body });
+    return { ok: true, message: `Sent to ${to} from ${config.address}.` };
+  } catch (err) {
+    return { ok: false, message: `Send failed: ${err.message}` };
+  }
 }
