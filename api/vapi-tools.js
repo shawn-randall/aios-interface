@@ -7,6 +7,7 @@
 // connector. Keep this file free of Vapi-specific business logic beyond parsing.
 
 import { DAVClient } from "tsdav";
+import * as chrono from "chrono-node";
 
 const TODOIST_TOKEN = process.env.TODOIST_API_TOKEN;
 const TODOIST_BASE = "https://api.todoist.com/api/v1";
@@ -54,6 +55,26 @@ async function todoistClose(id) {
 // (America/New_York). Keeps date math out of the LLM — no hallucinated dates.
 function resolveWhen(phrase) {
   if (!phrase) return { date: null, time: null };
+
+  // Primary: chrono-node, robust NL date parsing relative to NY "now".
+  // Extract calendar component values directly (TZ-safe — no Date shifting).
+  try {
+    const ref = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+    const results = chrono.parse(phrase, ref, { forwardDate: true });
+    if (results && results.length) {
+      const s = results[0].start;
+      const y = s.get("year"), mo = s.get("month"), d = s.get("day");
+      if (y && mo && d) {
+        const pad = (n) => String(n).padStart(2, "0");
+        const date = `${y}-${pad(mo)}-${pad(d)}`;
+        let time = null;
+        if (s.isCertain("hour")) time = `${pad(s.get("hour"))}:${pad(s.get("minute") || 0)}`;
+        return { date, time };
+      }
+    }
+  } catch (_) { /* fall through to hand-rolled */ }
+
+  // Fallback: hand-rolled resolver for anything chrono misses.
   const p = phrase.toLowerCase().trim();
   const TZ = "America/New_York";
   const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: TZ }); // YYYY-MM-DD
@@ -110,7 +131,7 @@ function resolveWhen(phrase) {
 }
 
 // Calendar (iCloud CalDAV) — reused from the web app's add_event connector.
-async function caldavAddEvent(title, date, time, durationMins = 60) {
+async function caldavAddEvent(title, date, time, durationMins = 60, calendarName = null) {
   const davClient = new DAVClient({
     serverUrl: "https://caldav.icloud.com",
     credentials: { username: process.env.APPLE_ID, password: process.env.APPLE_APP_PASSWORD },
@@ -120,9 +141,18 @@ async function caldavAddEvent(title, date, time, durationMins = 60) {
   await davClient.login();
   const calendars = await davClient.fetchCalendars();
   if (!calendars.length) return null;
-  const PREFERRED = ["home", "personal", "calendar"];
-  const cal = calendars.find((c) => PREFERRED.some((p) => (c.displayName || "").toLowerCase().includes(p)))
-    || calendars.find((c) => !(c.displayName || "").toLowerCase().includes("ensemble")) || calendars[0];
+  let cal;
+  if (calendarName) {
+    // Match the requested calendar by name (case-insensitive contains).
+    const q = calendarName.toLowerCase().trim();
+    cal = calendars.find((c) => (c.displayName || "").toLowerCase().includes(q));
+    if (!cal) return { error: "calendar_not_found", available: calendars.map((c) => c.displayName).filter(Boolean) };
+  }
+  if (!cal) {
+    const PREFERRED = ["home", "personal", "calendar"];
+    cal = calendars.find((c) => PREFERRED.some((p) => (c.displayName || "").toLowerCase().includes(p)))
+      || calendars.find((c) => !(c.displayName || "").toLowerCase().includes("ensemble")) || calendars[0];
+  }
 
   const timeStr = time || "12:00";
   const fmtLocal = (d, t) => { const [y, m, dy] = d.split("-"); const [h, mn] = t.split(":"); return `${y}${m}${dy}T${h}${mn}00`; };
@@ -139,7 +169,7 @@ async function caldavAddEvent(title, date, time, durationMins = 60) {
     `SUMMARY:${title}`, "END:VEVENT", "END:VCALENDAR",
   ].join("\r\n");
   await davClient.createCalendarObject({ calendar: cal, filename: `${uid}.ics`, iCalString: vcal });
-  return { date, timeStr, durationMins };
+  return { date, timeStr, durationMins, calendar: cal.displayName || "your calendar" };
 }
 
 // Read upcoming events from iCloud calendar (voice-friendly summary).
@@ -245,12 +275,14 @@ const TOOLS = {
     const { date, time } = resolveWhen(args.when || args.date || "");
     if (!date) return "I couldn't pin down the date. Try saying it like 'next Friday at 4pm' or 'June 6th at noon'.";
     try {
-      const r = await caldavAddEvent(title, date, time, args.duration_mins || 60);
+      const r = await caldavAddEvent(title, date, time, args.duration_mins || 60, args.calendar_name || null);
       if (!r) return "Sorry, I couldn't reach your calendar.";
+      if (r.error === "calendar_not_found") {
+        return `I couldn't find a calendar called "${args.calendar_name}". Your calendars are: ${r.available.join(", ")}. Which one?`;
+      }
       // Speak the resolved date back so Shawn can confirm it's right.
-      // Parse as UTC + display in UTC so the YYYY-MM-DD never shifts a day.
       const spoken = new Date(date + "T00:00:00Z").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" });
-      return `Added "${title}" on ${spoken}${time ? ` at ${time}` : ""}.`;
+      return `Added "${title}" on ${spoken}${time ? ` at ${time}` : ""}${r.calendar ? `, to your ${r.calendar} calendar` : ""}.`;
     } catch (e) {
       return "Sorry, something went wrong adding that to your calendar.";
     }

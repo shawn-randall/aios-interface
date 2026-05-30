@@ -5,6 +5,7 @@
   "private": true,
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "chrono-node": "^2.7.7",
     "imap-simple": "^5.1.0",
     "node-ical": "^0.26.1",
     "nodemailer": "^8.0.9",
