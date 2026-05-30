@@ -240,7 +240,15 @@
     voiceOn = !voiceOn;
     localStorage.setItem("aios_voice", voiceOn ? "on" : "off");
     renderVoiceToggle();
-    if (!voiceOn && window.speechSynthesis) window.speechSynthesis.cancel();
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+      if (voiceOn) {
+        // iOS unlock: speaking inside this tap gesture enables TTS for later async replies
+        const u = new SpeechSynthesisUtterance("Voice on");
+        u.rate = 1.0;
+        window.speechSynthesis.speak(u);
+      }
+    }
   }
   function speak(text) {
     if (!voiceOn || !window.speechSynthesis) return;
