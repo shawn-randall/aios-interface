@@ -10,6 +10,8 @@ import { DAVClient } from "tsdav";
 
 const TODOIST_TOKEN = process.env.TODOIST_API_TOKEN;
 const TODOIST_BASE = "https://api.todoist.com/api/v1";
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const REPO = "shawn-randall/AIS-OS";
 
 // Owner identity (caller number) — env, never hardcoded in a committed value.
 // Used for the role layer; for now we capture it and default to owner-lite.
@@ -131,6 +133,58 @@ async function caldavAddEvent(title, date, time, durationMins = 60) {
   return { date, timeStr, durationMins };
 }
 
+// Read upcoming events from iCloud calendar (voice-friendly summary).
+async function caldavListEvents(days = 7) {
+  const davClient = new DAVClient({
+    serverUrl: "https://caldav.icloud.com",
+    credentials: { username: process.env.APPLE_ID, password: process.env.APPLE_APP_PASSWORD },
+    authMethod: "Basic", defaultAccountType: "caldav",
+  });
+  await davClient.login();
+  const calendars = await davClient.fetchCalendars();
+  const now = new Date();
+  const end = new Date(now.getTime() + days * 864e5);
+  const events = [];
+  for (const cal of calendars.slice(0, 8)) {
+    try {
+      const objs = await davClient.fetchCalendarObjects({ calendar: cal, timeRange: { start: now.toISOString(), end: end.toISOString() } });
+      for (const o of objs) {
+        const data = o.data || "";
+        const summary = (data.match(/SUMMARY:(.*)/) || [])[1]?.trim() || "Event";
+        const dt = (data.match(/DTSTART[^:]*:(.*)/) || [])[1]?.trim() || "";
+        const m = dt.replace(/\s/g, "").match(/(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2}))?/);
+        if (!m) continue;
+        const [, y, mo, d, h, mi] = m;
+        const ts = new Date(`${y}-${mo}-${d}T${h || "00"}:${mi || "00"}:00`).getTime();
+        const label = h ? `${mo}/${d} at ${((+h % 12) || 12)}${+h >= 12 ? "pm" : "am"}` : `${mo}/${d}`;
+        events.push({ ts, summary, label });
+      }
+    } catch (_) {}
+  }
+  events.sort((a, b) => a.ts - b.ts);
+  return events;
+}
+
+// Append a note to context/voice-notes.md via the GitHub Contents API.
+async function githubAppendNote(note) {
+  const path = "context/voice-notes.md";
+  const url = `https://api.github.com/repos/${REPO}/contents/${path}`;
+  const headers = { Authorization: `token ${GITHUB_TOKEN}`, Accept: "application/vnd.github.v3+json" };
+  let existing = "# Voice Notes\n\nQuick notes captured by voice.\n", sha;
+  const meta = await fetch(url, { headers });
+  if (meta.ok) {
+    const j = await meta.json();
+    sha = j.sha;
+    existing = Buffer.from(j.content, "base64").toString("utf8");
+  }
+  const stamp = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
+  const updated = existing.replace(/\s*$/, "") + `\n- [${stamp}] ${note}\n`;
+  const body = { message: "Voice note", content: Buffer.from(updated).toString("base64") };
+  if (sha) body.sha = sha;
+  const res = await fetch(url, { method: "PUT", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return res.ok;
+}
+
 // ── Tool registry ──────────────────────────────────────────────────────────
 // name → async (args, ctx) => string (a short, voice-friendly result line)
 
@@ -184,6 +238,47 @@ const TOOLS = {
       return `Added "${title}" on ${spoken}${time ? ` at ${time}` : ""}.`;
     } catch (e) {
       return "Sorry, something went wrong adding that to your calendar.";
+    }
+  },
+
+  complete_task: async (args) => {
+    const q = (args.task_name || "").toLowerCase().trim();
+    if (!q) return "Which task should I mark done?";
+    const data = await todoistGet("/tasks");
+    if (!data) return "Sorry, I couldn't reach your task list.";
+    const tasks = data.results ?? data;
+    // Best match: exact-ish contains, else word overlap
+    let match = tasks.find((t) => t.content.toLowerCase().includes(q));
+    if (!match) {
+      const words = q.split(/\s+/).filter((w) => w.length > 2);
+      match = tasks.find((t) => words.some((w) => t.content.toLowerCase().includes(w)));
+    }
+    if (!match) return `I couldn't find a task matching "${args.task_name}".`;
+    const ok = await todoistPost(`/tasks/${match.id}/close`);
+    return ok !== null ? `Done — marked "${match.content}" complete.` : "Sorry, I couldn't mark that complete.";
+  },
+
+  get_schedule: async (args) => {
+    const days = args.days || 7;
+    try {
+      const events = await caldavListEvents(days);
+      if (!events.length) return `Nothing on your calendar in the next ${days} days.`;
+      const top = events.slice(0, 6).map((e) => `${e.summary} on ${e.label}`);
+      const more = events.length > 6 ? ` Plus ${events.length - 6} more.` : "";
+      return `You have ${events.length} event${events.length === 1 ? "" : "s"} coming up: ${top.join("; ")}.${more}`;
+    } catch (e) {
+      return "Sorry, I couldn't reach your calendar right now.";
+    }
+  },
+
+  save_note: async (args) => {
+    const note = (args.note || "").trim();
+    if (!note) return "What should I note down?";
+    try {
+      const ok = await githubAppendNote(note);
+      return ok ? "Got it — noted." : "Sorry, I couldn't save that note.";
+    } catch (e) {
+      return "Sorry, something went wrong saving that note.";
     }
   },
 };
