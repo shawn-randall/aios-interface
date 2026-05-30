@@ -38,6 +38,66 @@ async function todoistGet(path, params = {}) {
   return res.json();
 }
 
+// Resolve a spoken date/time phrase ("next Friday at 4pm", "tomorrow", "June 6 at noon")
+// to { date: 'YYYY-MM-DD', time: 'HH:MM' | null } using the SERVER's current date
+// (America/New_York). Keeps date math out of the LLM — no hallucinated dates.
+function resolveWhen(phrase) {
+  if (!phrase) return { date: null, time: null };
+  const p = phrase.toLowerCase().trim();
+  const TZ = "America/New_York";
+  const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: TZ }); // YYYY-MM-DD
+  const [ty, tm, td] = todayStr.split("-").map(Number);
+  const today = new Date(Date.UTC(ty, tm - 1, td));
+  const days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  const months = ["january","february","march","april","may","june","july","august","september","october","november","december"];
+
+  const iso = (d) => d.toISOString().slice(0, 10);
+
+  // ── time ──
+  let time = null;
+  let tm2 = p.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
+  if (tm2) {
+    let h = parseInt(tm2[1], 10); const mn = tm2[2] ? parseInt(tm2[2], 10) : 0;
+    if (tm2[3] === "pm" && h < 12) h += 12;
+    if (tm2[3] === "am" && h === 12) h = 0;
+    time = `${String(h).padStart(2, "0")}:${String(mn).padStart(2, "0")}`;
+  } else if (/\bnoon\b/.test(p)) time = "12:00";
+  else if (/\bmidnight\b/.test(p)) time = "00:00";
+  else { // bare "at 4" → assume pm-ish daytime
+    const bare = p.match(/\bat\s+(\d{1,2})(?::(\d{2}))?\b/);
+    if (bare) { let h = parseInt(bare[1], 10); if (h <= 7) h += 12; time = `${String(h).padStart(2,"0")}:${String(bare[2]?parseInt(bare[2],10):0).padStart(2,"0")}`; }
+  }
+
+  // ── date ──
+  let date = null;
+  const addDays = (n) => { const d = new Date(today); d.setUTCDate(d.getUTCDate() + n); return iso(d); };
+
+  if (/\btoday\b/.test(p)) date = iso(today);
+  else if (/\btomorrow\b/.test(p)) date = addDays(1);
+  else {
+    // explicit "June 6", "june 6th"
+    const md = p.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})/);
+    if (md) {
+      const mi = months.findIndex((m) => m.startsWith(md[1]));
+      let yr = ty;
+      let cand = new Date(Date.UTC(yr, mi, parseInt(md[2], 10)));
+      if (cand < today) cand = new Date(Date.UTC(yr + 1, mi, parseInt(md[2], 10)));
+      date = iso(cand);
+    } else {
+      // weekday: "friday", "next friday", "this friday"
+      const wd = days.findIndex((d) => p.includes(d));
+      if (wd >= 0) {
+        const todayDow = today.getUTCDay();
+        let delta = (wd - todayDow + 7) % 7;
+        if (delta === 0) delta = 7;            // same weekday name → next week
+        if (/\bnext\b/.test(p) && delta <= 7) {} // "next friday" = the coming friday (already handled)
+        date = addDays(delta);
+      }
+    }
+  }
+  return { date, time };
+}
+
 // Calendar (iCloud CalDAV) — reused from the web app's add_event connector.
 async function caldavAddEvent(title, date, time, durationMins = 60) {
   const davClient = new DAVClient({
@@ -111,12 +171,16 @@ const TOOLS = {
 
   add_event: async (args) => {
     const title = (args.title || "").trim();
-    const date = (args.date || "").trim();
-    if (!title || !date) return "I need both a title and a date for the event.";
+    if (!title) return "What should I call the event?";
+    // Resolve the spoken date/time server-side (no LLM date guessing).
+    const { date, time } = resolveWhen(args.when || args.date || "");
+    if (!date) return "I couldn't pin down the date. Try saying it like 'next Friday at 4pm' or 'June 6th at noon'.";
     try {
-      const r = await caldavAddEvent(title, date, args.time, args.duration_mins || 60);
+      const r = await caldavAddEvent(title, date, time, args.duration_mins || 60);
       if (!r) return "Sorry, I couldn't reach your calendar.";
-      return `Added "${title}" to your calendar on ${date}${args.time ? ` at ${args.time}` : ""}.`;
+      // Speak the resolved date back so Shawn can confirm it's right.
+      const spoken = new Date(date + "T00:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "America/New_York" });
+      return `Added "${title}" on ${spoken}${time ? ` at ${time}` : ""}.`;
     } catch (e) {
       return "Sorry, something went wrong adding that to your calendar.";
     }
