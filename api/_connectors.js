@@ -123,12 +123,13 @@ function pickCalendar(calendars, calendarName) {
 
 // ── CAPABILITIES ────────────────────────────────────────────────────────────
 
-export async function addTask({ content, due_string, priority } = {}) {
+export async function addTask({ content, due_string, priority, labels } = {}) {
   content = (content || "").trim();
   if (!content) return { ok: false, message: "What should the task say?" };
   const body = { content };
   if (due_string) body.due_string = due_string;
   if (priority) body.priority = priority;
+  if (labels && labels.length) body.labels = labels;
   const task = await tdPost("/tasks", body);
   if (!task) return { ok: false, message: "I couldn't add that task — a problem reaching Todoist." };
   return { ok: true, data: task, message: `Added "${task.content}"${task.due ? ` due ${task.due.string}` : ""}.` };
@@ -311,4 +312,55 @@ export async function sendEmail({ to, subject, body, from_account } = {}) {
   } catch (err) {
     return { ok: false, message: `Send failed: ${err.message}` };
   }
+}
+
+// ── Guest / receptionist capabilities ───────────────────────────────────────
+// What an UNKNOWN caller is allowed to do. None of these direct the AIOS — they
+// only deposit something for Shawn to see/approve later. Each lands in Todoist
+// tagged `@aios` so it surfaces in the morning brief. Gating lives in _roles.js;
+// these just do the deposit. Reuses addTask so improvements propagate everywhere.
+
+// Pre-approved info a guest may hear. PUBLIC only — never private data. Override
+// via env (PUBLIC_BOOKING_INFO) without a redeploy.
+const PUBLIC_INFO = process.env.PUBLIC_BOOKING_INFO
+  || "For booking and inquiries, email shawnalfredrandall@gmail.com and Shawn will get back to you.";
+
+export async function leaveMessage({ name, number, topic } = {}) {
+  const who = (name || "").trim() || "Someone";
+  const re = (topic || "").trim();
+  const back = (number || "").trim();
+  const content = `📞 Message from ${who}${back ? ` (${back})` : ""}${re ? `: ${re}` : ""}`;
+  const r = await addTask({ content, labels: ["aios"] });
+  return r.ok
+    ? { ok: true, data: r.data, message: `Got it — I'll let Shawn know${re ? ` about ${re}` : ""}. Anything else?` }
+    : { ok: false, message: "I had trouble saving that message. Could you try again in a moment?" };
+}
+
+export async function requestCallback({ name, number } = {}) {
+  const who = (name || "").trim() || "a caller";
+  const back = (number || "").trim();
+  if (!back) return { ok: false, message: "What's the best number for Shawn to call you back on?" };
+  const r = await addTask({ content: `📞 Call ${who} back at ${back}`, labels: ["aios"] });
+  return r.ok
+    ? { ok: true, data: r.data, message: `Done — I've asked Shawn to call ${who} back at ${back}.` }
+    : { ok: false, message: "I couldn't log that callback. Mind trying again?" };
+}
+
+// Creates a PENDING request, NOT a real calendar event. Shawn approves later.
+export async function requestCalendarHold({ name, when, topic } = {}) {
+  const who = (name || "").trim() || "Someone";
+  const re = (topic || "").trim();
+  const { date } = resolveWhen(when || "");
+  const whenLabel = date
+    ? new Date(date + "T00:00:00Z").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" })
+    : (when || "").trim() || "a time to be confirmed";
+  const content = `🗓️ PENDING: ${who} requests ${whenLabel}${re ? ` — ${re}` : ""}`;
+  const r = await addTask({ content, labels: ["aios"] });
+  return r.ok
+    ? { ok: true, data: r.data, message: `I've put in a request for ${whenLabel} and flagged it for Shawn to confirm. He'll reach out if it works.` }
+    : { ok: false, message: "I couldn't log that request. Could you try again?" };
+}
+
+export async function publicInfo() {
+  return { ok: true, data: { info: PUBLIC_INFO }, message: PUBLIC_INFO };
 }

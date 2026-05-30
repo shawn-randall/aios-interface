@@ -1,6 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 // Shared capability layer — same connectors the voice + SMS channels use.
 import { addTask as cAddTask, listTasks as cListTasks, completeTask as cCompleteTask, addEvent as cAddEvent, listEvents as cListEvents, saveNote as cSaveNote, readEmail as cReadEmail, sendEmail as cSendEmail } from "./_connectors.js";
+// Same access-control layer voice + SMS use. Web is Shawn's private deployment,
+// so the role is always owner — but routing through resolveRole keeps the gate
+// uniform across every channel (defense in depth; SMS will reuse it verbatim).
+import { resolveRole, isToolAllowed } from "./_roles.js";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const REPO = "shawn-randall/AIS-OS";
@@ -206,6 +210,10 @@ const TOOLS = [
 // --- Tool executor ---
 
 async function executeTool(name, input, savedFiles) {
+  // Web = Shawn's own deployment → owner. Gate anyway so the contract is uniform.
+  const role = resolveRole({ channel: "web" });
+  if (!isToolAllowed(role, name)) return "That action isn't permitted.";
+
   if (name === "save_context") {
     const { file, content, commit_message } = input;
     const ok = await writeContext(file, content, `Phone: ${commit_message}`);
