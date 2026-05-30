@@ -1,0 +1,236 @@
+// ── AIOS Connectors — the shared capability layer ──────────────────────────
+//
+// THE single source of truth for what the AIOS can DO. One real implementation
+// of each capability, agnostic to how it's invoked. Every channel adapter
+// (web chat → v2.js, voice → vapi-tools.js, SMS → sms.js) imports from here.
+//
+// Principle (references/architecture-principles.md): improve a capability once,
+// and every access point gets it automatically. Channels translate format and
+// formatting; the real work lives here.
+//
+// Each capability returns a structured result:
+//   { ok: boolean, message: string, data?: any }
+// - `message` is a clean, human/voice-friendly line a channel can speak or show.
+// - `data` is the structured result for channels that want to format their own.
+
+import { DAVClient } from "tsdav";
+import * as chrono from "chrono-node";
+
+// ── Env / config ────────────────────────────────────────────────────────────
+const TODOIST_TOKEN = process.env.TODOIST_API_TOKEN;
+const TODOIST_BASE = "https://api.todoist.com/api/v1";
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const REPO = "shawn-randall/AIS-OS";
+const APPLE_ID = process.env.APPLE_ID;
+const APPLE_APP_PASSWORD = process.env.APPLE_APP_PASSWORD;
+const CALENDAR_TZ = "America/New_York";
+
+const pad = (n) => String(n).padStart(2, "0");
+
+// ── Todoist primitives ──────────────────────────────────────────────────────
+async function tdGet(path, params = {}) {
+  const url = new URL(`${TODOIST_BASE}${path}`);
+  Object.entries(params).forEach(([k, v]) => v != null && url.searchParams.set(k, v));
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${TODOIST_TOKEN}` } });
+  if (!res.ok) return null;
+  return res.json();
+}
+async function tdPost(path, body = {}) {
+  const res = await fetch(`${TODOIST_BASE}${path}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${TODOIST_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+// Close returns 204 No Content — check res.ok, don't parse JSON.
+async function tdClose(id) {
+  const res = await fetch(`${TODOIST_BASE}/tasks/${id}/close`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${TODOIST_TOKEN}` },
+  });
+  return res.ok;
+}
+
+// ── Date resolution (shared) ────────────────────────────────────────────────
+// Resolve a spoken/typed phrase ("next Friday at 4pm", "Wednesday the 3rd",
+// "June 6th at noon") to { date: 'YYYY-MM-DD', time: 'HH:MM' | null } using the
+// real current date in NY. chrono-node primary; never trust an LLM to do dates.
+export function resolveWhen(phrase) {
+  if (!phrase) return { date: null, time: null };
+  try {
+    const ref = new Date(new Date().toLocaleString("en-US", { timeZone: CALENDAR_TZ }));
+    const results = chrono.parse(phrase, ref, { forwardDate: true });
+    if (results && results.length) {
+      const s = results[0].start;
+      const y = s.get("year"), mo = s.get("month"), d = s.get("day");
+      if (y && mo && d) {
+        let time = null;
+        if (s.isCertain("hour")) time = `${pad(s.get("hour"))}:${pad(s.get("minute") || 0)}`;
+        return { date: `${y}-${pad(mo)}-${pad(d)}`, time };
+      }
+    }
+  } catch (_) { /* ignore, treat as unresolved */ }
+  return { date: null, time: null };
+}
+
+// ── CalDAV (iCloud) primitives ──────────────────────────────────────────────
+async function caldavClient() {
+  const c = new DAVClient({
+    serverUrl: "https://caldav.icloud.com",
+    credentials: { username: APPLE_ID, password: APPLE_APP_PASSWORD },
+    authMethod: "Basic", defaultAccountType: "caldav",
+  });
+  await c.login();
+  return c;
+}
+function pickCalendar(calendars, calendarName) {
+  if (calendarName) {
+    const q = calendarName.toLowerCase().trim();
+    const found = calendars.find((c) => (c.displayName || "").toLowerCase().includes(q));
+    if (found) return found;
+    return null; // signal not-found
+  }
+  const PREFERRED = ["home", "personal", "calendar"];
+  return calendars.find((c) => PREFERRED.some((p) => (c.displayName || "").toLowerCase().includes(p)))
+    || calendars.find((c) => !(c.displayName || "").toLowerCase().includes("ensemble"))
+    || calendars[0];
+}
+
+// ── CAPABILITIES ────────────────────────────────────────────────────────────
+
+export async function addTask({ content, due_string, priority } = {}) {
+  content = (content || "").trim();
+  if (!content) return { ok: false, message: "What should the task say?" };
+  const body = { content };
+  if (due_string) body.due_string = due_string;
+  if (priority) body.priority = priority;
+  const task = await tdPost("/tasks", body);
+  if (!task) return { ok: false, message: "I couldn't add that task — a problem reaching Todoist." };
+  return { ok: true, data: task, message: `Added "${task.content}"${task.due ? ` due ${task.due.string}` : ""}.` };
+}
+
+export async function listTasks({ scope = "today" } = {}) {
+  const data = await tdGet("/tasks");
+  if (!data) return { ok: false, message: "I couldn't reach your task list." };
+  let tasks = data.results ?? data;
+  scope = (scope || "today").toLowerCase();
+  if (scope !== "all") {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: CALENDAR_TZ });
+    tasks = tasks.filter((t) => t.due && t.due.date && t.due.date <= today);
+  }
+  if (!tasks.length) {
+    return { ok: true, data: [], message: scope === "all" ? "You have no active tasks. You're clear." : "Nothing due today or overdue. You're all caught up." };
+  }
+  const top = tasks.slice(0, 8).map((t) => t.content + (t.due ? ` (due ${t.due.string})` : ""));
+  const more = tasks.length > 8 ? ` Plus ${tasks.length - 8} more.` : "";
+  const noun = `task${tasks.length === 1 ? "" : "s"}`;
+  const phrase = scope === "all" ? `${tasks.length} active ${noun}` : `${tasks.length} ${noun} due or overdue`;
+  return { ok: true, data: tasks, message: `You have ${phrase}: ${top.join("; ")}.${more}` };
+}
+
+export async function completeTask({ task_name } = {}) {
+  const q = (task_name || "").toLowerCase().trim();
+  if (!q) return { ok: false, message: "Which task should I mark done?" };
+  const data = await tdGet("/tasks");
+  if (!data) return { ok: false, message: "I couldn't reach your task list." };
+  const tasks = data.results ?? data;
+  let matches = tasks.filter((t) => t.content.toLowerCase().includes(q));
+  if (!matches.length) {
+    const words = q.split(/\s+/).filter((w) => w.length > 2);
+    const m = tasks.find((t) => words.some((w) => t.content.toLowerCase().includes(w)));
+    if (m) matches = [m];
+  }
+  if (!matches.length) return { ok: false, message: `I couldn't find a task matching "${task_name}".` };
+  let done = 0;
+  for (const m of matches) { if (await tdClose(m.id)) done++; }
+  if (done === 0) return { ok: false, message: "I couldn't mark that complete." };
+  const message = matches.length > 1
+    ? `There were ${matches.length} tasks matching that — I marked all ${done} complete.`
+    : `Marked "${matches[0].content}" complete.`;
+  return { ok: true, data: { completed: done }, message };
+}
+
+export async function addEvent({ title, when, calendar_name, duration_mins = 60 } = {}) {
+  title = (title || "").trim();
+  if (!title) return { ok: false, message: "What should I call the event?" };
+  const { date, time } = resolveWhen(when || "");
+  if (!date) return { ok: false, message: "I couldn't pin down the date. Try 'next Friday at 4pm' or 'June 6th at noon'." };
+
+  const c = await caldavClient();
+  const calendars = await c.fetchCalendars();
+  if (!calendars.length) return { ok: false, message: "I couldn't reach your calendar." };
+  const cal = pickCalendar(calendars, calendar_name);
+  if (!cal) {
+    const names = calendars.map((x) => x.displayName).filter(Boolean).join(", ");
+    return { ok: false, message: `I couldn't find a calendar called "${calendar_name}". Your calendars: ${names}. Which one?` };
+  }
+
+  const timeStr = time || "12:00";
+  const fmtLocal = (d, t) => { const [y, m, dy] = d.split("-"); const [h, mn] = t.split(":"); return `${y}${m}${dy}T${h}${mn}00`; };
+  const [sh, sm] = timeStr.split(":").map(Number);
+  const tot = sh * 60 + sm + duration_mins;
+  const endTime = `${pad(Math.floor(tot / 60) % 24)}:${pad(tot % 60)}`;
+  const uid = `aios-${Date.now()}@shawn`;
+  const nowUtc = new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15) + "Z";
+  const vcal = [
+    "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//AIOS//EN", "BEGIN:VEVENT",
+    `UID:${uid}`, `DTSTAMP:${nowUtc}`,
+    `DTSTART;TZID=America/New_York:${fmtLocal(date, timeStr)}`,
+    `DTEND;TZID=America/New_York:${fmtLocal(date, endTime)}`,
+    `SUMMARY:${title}`, "END:VEVENT", "END:VCALENDAR",
+  ].join("\r\n");
+  await c.createCalendarObject({ calendar: cal, filename: `${uid}.ics`, iCalString: vcal });
+
+  const spoken = new Date(date + "T00:00:00Z").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" });
+  return { ok: true, data: { date, time, calendar: cal.displayName }, message: `Added "${title}" on ${spoken}${time ? ` at ${time}` : ""}, to your ${cal.displayName || "default"} calendar.` };
+}
+
+export async function listEvents({ days = 7 } = {}) {
+  const c = await caldavClient();
+  const calendars = await c.fetchCalendars();
+  const now = new Date();
+  const end = new Date(now.getTime() + days * 864e5);
+  const events = [];
+  for (const cal of calendars.slice(0, 8)) {
+    try {
+      const objs = await c.fetchCalendarObjects({ calendar: cal, timeRange: { start: now.toISOString(), end: end.toISOString() } });
+      for (const o of objs) {
+        const data = (o.data || "").replace(/\r\n[ \t]/g, "").replace(/\n[ \t]/g, "");
+        let summary = (data.match(/SUMMARY:(.*)/) || [])[1]?.trim() || "Event";
+        summary = summary.replace(/\\,/g, ",").replace(/\\;/g, ";").replace(/\\n/gi, " ").replace(/\\\\/g, "\\");
+        const dt = (data.match(/DTSTART[^:]*:(.*)/) || [])[1]?.trim() || "";
+        const m = dt.replace(/\s/g, "").match(/(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2}))?/);
+        if (!m) continue;
+        const [, y, mo, d, h, mi] = m;
+        const ts = new Date(`${y}-${mo}-${d}T${h || "00"}:${mi || "00"}:00`).getTime();
+        const dayName = new Date(`${y}-${mo}-${d}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" });
+        const timeLabel = h ? ` at ${((+h % 12) || 12)}${mi && mi !== "00" ? ":" + mi : ""}${+h >= 12 ? "pm" : "am"}` : "";
+        events.push({ ts, summary, label: dayName + timeLabel });
+      }
+    } catch (_) {}
+  }
+  events.sort((a, b) => a.ts - b.ts);
+  if (!events.length) return { ok: true, data: [], message: `Nothing on your calendar in the next ${days} days.` };
+  const top = events.slice(0, 6).map((e) => `${e.summary} on ${e.label}`);
+  const more = events.length > 6 ? ` Plus ${events.length - 6} more.` : "";
+  return { ok: true, data: events, message: `You have ${events.length} event${events.length === 1 ? "" : "s"} coming up: ${top.join("; ")}.${more}` };
+}
+
+export async function saveNote({ note } = {}) {
+  note = (note || "").trim();
+  if (!note) return { ok: false, message: "What should I note down?" };
+  const path = "context/voice-notes.md";
+  const url = `https://api.github.com/repos/${REPO}/contents/${path}`;
+  const headers = { Authorization: `token ${GITHUB_TOKEN}`, Accept: "application/vnd.github.v3+json" };
+  let existing = "# Voice Notes\n\nQuick notes captured by voice.\n", sha;
+  const meta = await fetch(url, { headers });
+  if (meta.ok) { const j = await meta.json(); sha = j.sha; existing = Buffer.from(j.content, "base64").toString("utf8"); }
+  const stamp = new Date().toLocaleString("en-US", { timeZone: CALENDAR_TZ });
+  const updated = existing.replace(/\s*$/, "") + `\n- [${stamp}] ${note}\n`;
+  const body = { message: "Note (via AIOS)", content: Buffer.from(updated).toString("base64") };
+  if (sha) body.sha = sha;
+  const res = await fetch(url, { method: "PUT", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return res.ok ? { ok: true, message: "Saved to your AIOS notes." } : { ok: false, message: "I couldn't save that note." };
+}

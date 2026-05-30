@@ -1,340 +1,27 @@
-// ── Vapi Tools channel adapter ─────────────────────────────────────────────
-// A thin CHANNEL adapter (per architecture-principles.md): translates Vapi's
-// tool-call webhook format into AIOS connector calls and back. The voice agent
-// (Vapi) is the channel + orchestrator; this exposes AIOS capabilities as tools.
+// ── Vapi Tools — VOICE channel adapter ─────────────────────────────────────
 //
-// Add a capability = add one entry to TOOLS below. Each is a self-contained
-// connector. Keep this file free of Vapi-specific business logic beyond parsing.
+// Thin adapter (references/architecture-principles.md): translates Vapi's
+// tool-call webhook format into shared AIOS connector calls and returns the
+// voice-friendly `message`. ALL real capability logic lives in _connectors.js
+// so voice, web chat, and SMS stay in lockstep — improve once, every channel
+// gets it. Add a voice tool = map a name here + add the connector (if new) +
+// register the schema in scripts/aios_vapi.py, then `sync`.
 
-import { DAVClient } from "tsdav";
-import * as chrono from "chrono-node";
+import { addTask, listTasks, completeTask, addEvent, listEvents, saveNote } from "./_connectors.js";
 
-const TODOIST_TOKEN = process.env.TODOIST_API_TOKEN;
-const TODOIST_BASE = "https://api.todoist.com/api/v1";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const REPO = "shawn-randall/AIS-OS";
-
-// Owner identity (caller number) — env, never hardcoded in a committed value.
-// Used for the role layer; for now we capture it and default to owner-lite.
+// Owner identity (caller number) — for the future role layer. Captured now,
+// gating to be added per projects/voice-agent.md.
 const OWNER_NUMBERS = (process.env.AIOS_OWNER_NUMBERS || "").split(",").map((s) => s.trim()).filter(Boolean);
 
-// ── Connectors (reused AIOS logic) ─────────────────────────────────────────
-
-async function todoistPost(path, body = {}) {
-  const res = await fetch(`${TODOIST_BASE}${path}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${TODOIST_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) return null;
-  return res.json();
-}
-
-async function todoistGet(path, params = {}) {
-  const url = new URL(`${TODOIST_BASE}${path}`);
-  Object.entries(params).forEach(([k, v]) => v != null && url.searchParams.set(k, v));
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${TODOIST_TOKEN}` } });
-  if (!res.ok) return null;
-  return res.json();
-}
-
-// Close a task. Todoist returns 204 No Content (empty body) — check res.ok, don't parse JSON.
-async function todoistClose(id) {
-  const res = await fetch(`${TODOIST_BASE}/tasks/${id}/close`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${TODOIST_TOKEN}` },
-  });
-  return res.ok;
-}
-
-// Resolve a spoken date/time phrase ("next Friday at 4pm", "tomorrow", "June 6 at noon")
-// to { date: 'YYYY-MM-DD', time: 'HH:MM' | null } using the SERVER's current date
-// (America/New_York). Keeps date math out of the LLM — no hallucinated dates.
-function resolveWhen(phrase) {
-  if (!phrase) return { date: null, time: null };
-
-  // Primary: chrono-node, robust NL date parsing relative to NY "now".
-  // Extract calendar component values directly (TZ-safe — no Date shifting).
-  try {
-    const ref = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
-    const results = chrono.parse(phrase, ref, { forwardDate: true });
-    if (results && results.length) {
-      const s = results[0].start;
-      const y = s.get("year"), mo = s.get("month"), d = s.get("day");
-      if (y && mo && d) {
-        const pad = (n) => String(n).padStart(2, "0");
-        const date = `${y}-${pad(mo)}-${pad(d)}`;
-        let time = null;
-        if (s.isCertain("hour")) time = `${pad(s.get("hour"))}:${pad(s.get("minute") || 0)}`;
-        return { date, time };
-      }
-    }
-  } catch (_) { /* fall through to hand-rolled */ }
-
-  // Fallback: hand-rolled resolver for anything chrono misses.
-  const p = phrase.toLowerCase().trim();
-  const TZ = "America/New_York";
-  const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: TZ }); // YYYY-MM-DD
-  const [ty, tm, td] = todayStr.split("-").map(Number);
-  const today = new Date(Date.UTC(ty, tm - 1, td));
-  const days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-  const months = ["january","february","march","april","may","june","july","august","september","october","november","december"];
-
-  const iso = (d) => d.toISOString().slice(0, 10);
-
-  // ── time ──
-  let time = null;
-  let tm2 = p.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/);
-  if (tm2) {
-    let h = parseInt(tm2[1], 10); const mn = tm2[2] ? parseInt(tm2[2], 10) : 0;
-    if (tm2[3] === "pm" && h < 12) h += 12;
-    if (tm2[3] === "am" && h === 12) h = 0;
-    time = `${String(h).padStart(2, "0")}:${String(mn).padStart(2, "0")}`;
-  } else if (/\bnoon\b/.test(p)) time = "12:00";
-  else if (/\bmidnight\b/.test(p)) time = "00:00";
-  else { // bare "at 4" → assume pm-ish daytime
-    const bare = p.match(/\bat\s+(\d{1,2})(?::(\d{2}))?\b/);
-    if (bare) { let h = parseInt(bare[1], 10); if (h <= 7) h += 12; time = `${String(h).padStart(2,"0")}:${String(bare[2]?parseInt(bare[2],10):0).padStart(2,"0")}`; }
-  }
-
-  // ── date ──
-  let date = null;
-  const addDays = (n) => { const d = new Date(today); d.setUTCDate(d.getUTCDate() + n); return iso(d); };
-
-  if (/\btoday\b/.test(p)) date = iso(today);
-  else if (/\btomorrow\b/.test(p)) date = addDays(1);
-  else {
-    // explicit "June 6", "june 6th"
-    const md = p.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})/);
-    if (md) {
-      const mi = months.findIndex((m) => m.startsWith(md[1]));
-      let yr = ty;
-      let cand = new Date(Date.UTC(yr, mi, parseInt(md[2], 10)));
-      if (cand < today) cand = new Date(Date.UTC(yr + 1, mi, parseInt(md[2], 10)));
-      date = iso(cand);
-    } else {
-      // weekday: "friday", "next friday", "this friday"
-      const wd = days.findIndex((d) => p.includes(d));
-      if (wd >= 0) {
-        const todayDow = today.getUTCDay();
-        let delta = (wd - todayDow + 7) % 7;
-        if (delta === 0) delta = 7;            // same weekday name → next week
-        if (/\bnext\b/.test(p) && delta <= 7) {} // "next friday" = the coming friday (already handled)
-        date = addDays(delta);
-      }
-    }
-  }
-  return { date, time };
-}
-
-// Calendar (iCloud CalDAV) — reused from the web app's add_event connector.
-async function caldavAddEvent(title, date, time, durationMins = 60, calendarName = null) {
-  const davClient = new DAVClient({
-    serverUrl: "https://caldav.icloud.com",
-    credentials: { username: process.env.APPLE_ID, password: process.env.APPLE_APP_PASSWORD },
-    authMethod: "Basic",
-    defaultAccountType: "caldav",
-  });
-  await davClient.login();
-  const calendars = await davClient.fetchCalendars();
-  if (!calendars.length) return null;
-  let cal;
-  if (calendarName) {
-    // Match the requested calendar by name (case-insensitive contains).
-    const q = calendarName.toLowerCase().trim();
-    cal = calendars.find((c) => (c.displayName || "").toLowerCase().includes(q));
-    if (!cal) return { error: "calendar_not_found", available: calendars.map((c) => c.displayName).filter(Boolean) };
-  }
-  if (!cal) {
-    const PREFERRED = ["home", "personal", "calendar"];
-    cal = calendars.find((c) => PREFERRED.some((p) => (c.displayName || "").toLowerCase().includes(p)))
-      || calendars.find((c) => !(c.displayName || "").toLowerCase().includes("ensemble")) || calendars[0];
-  }
-
-  const timeStr = time || "12:00";
-  const fmtLocal = (d, t) => { const [y, m, dy] = d.split("-"); const [h, mn] = t.split(":"); return `${y}${m}${dy}T${h}${mn}00`; };
-  const [sh, sm] = timeStr.split(":").map(Number);
-  const tot = sh * 60 + sm + durationMins;
-  const endTime = `${String(Math.floor(tot / 60) % 24).padStart(2, "0")}:${String(tot % 60).padStart(2, "0")}`;
-  const uid = `aios-${Date.now()}@shawn`;
-  const nowUtc = new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15) + "Z";
-  const vcal = [
-    "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//AIOS//EN", "BEGIN:VEVENT",
-    `UID:${uid}`, `DTSTAMP:${nowUtc}`,
-    `DTSTART;TZID=America/New_York:${fmtLocal(date, timeStr)}`,
-    `DTEND;TZID=America/New_York:${fmtLocal(date, endTime)}`,
-    `SUMMARY:${title}`, "END:VEVENT", "END:VCALENDAR",
-  ].join("\r\n");
-  await davClient.createCalendarObject({ calendar: cal, filename: `${uid}.ics`, iCalString: vcal });
-  return { date, timeStr, durationMins, calendar: cal.displayName || "your calendar" };
-}
-
-// Read upcoming events from iCloud calendar (voice-friendly summary).
-async function caldavListEvents(days = 7) {
-  const davClient = new DAVClient({
-    serverUrl: "https://caldav.icloud.com",
-    credentials: { username: process.env.APPLE_ID, password: process.env.APPLE_APP_PASSWORD },
-    authMethod: "Basic", defaultAccountType: "caldav",
-  });
-  await davClient.login();
-  const calendars = await davClient.fetchCalendars();
-  const now = new Date();
-  const end = new Date(now.getTime() + days * 864e5);
-  const events = [];
-  for (const cal of calendars.slice(0, 8)) {
-    try {
-      const objs = await davClient.fetchCalendarObjects({ calendar: cal, timeRange: { start: now.toISOString(), end: end.toISOString() } });
-      for (const o of objs) {
-        // Unfold iCal wrapped lines (CRLF + space/tab) before parsing.
-        const data = (o.data || "").replace(/\r\n[ \t]/g, "").replace(/\n[ \t]/g, "");
-        let summary = (data.match(/SUMMARY:(.*)/) || [])[1]?.trim() || "Event";
-        // Unescape iCal text: \, \; \\ \n
-        summary = summary.replace(/\\,/g, ",").replace(/\\;/g, ";").replace(/\\n/gi, " ").replace(/\\\\/g, "\\");
-        const dt = (data.match(/DTSTART[^:]*:(.*)/) || [])[1]?.trim() || "";
-        const m = dt.replace(/\s/g, "").match(/(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2}))?/);
-        if (!m) continue;
-        const [, y, mo, d, h, mi] = m;
-        const ts = new Date(`${y}-${mo}-${d}T${h || "00"}:${mi || "00"}:00`).getTime();
-        // Weekday + month name computed server-side (TZ-safe) so the model never guesses the day.
-        const dayName = new Date(`${y}-${mo}-${d}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" });
-        const timeLabel = h ? ` at ${((+h % 12) || 12)}${mi && mi !== "00" ? ":" + mi : ""}${+h >= 12 ? "pm" : "am"}` : "";
-        const label = dayName + timeLabel;
-        events.push({ ts, summary, label });
-      }
-    } catch (_) {}
-  }
-  events.sort((a, b) => a.ts - b.ts);
-  return events;
-}
-
-// Append a note to context/voice-notes.md via the GitHub Contents API.
-async function githubAppendNote(note) {
-  const path = "context/voice-notes.md";
-  const url = `https://api.github.com/repos/${REPO}/contents/${path}`;
-  const headers = { Authorization: `token ${GITHUB_TOKEN}`, Accept: "application/vnd.github.v3+json" };
-  let existing = "# Voice Notes\n\nQuick notes captured by voice.\n", sha;
-  const meta = await fetch(url, { headers });
-  if (meta.ok) {
-    const j = await meta.json();
-    sha = j.sha;
-    existing = Buffer.from(j.content, "base64").toString("utf8");
-  }
-  const stamp = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
-  const updated = existing.replace(/\s*$/, "") + `\n- [${stamp}] ${note}\n`;
-  const body = { message: "Voice note", content: Buffer.from(updated).toString("base64") };
-  if (sha) body.sha = sha;
-  const res = await fetch(url, { method: "PUT", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  return res.ok;
-}
-
-// ── Tool registry ──────────────────────────────────────────────────────────
-// name → async (args, ctx) => string (a short, voice-friendly result line)
-
+// name → connector. The voice channel speaks the connector's `message`.
 const TOOLS = {
-  add_task: async (args) => {
-    const content = (args.content || "").trim();
-    if (!content) return "I didn't catch the task. What should it say?";
-    const body = { content };
-    if (args.due_string) body.due_string = args.due_string;
-    if (args.priority) body.priority = args.priority;
-    const task = await todoistPost("/tasks", body);
-    if (!task) return "Sorry, I couldn't add that task — there was a problem reaching Todoist.";
-    return `Done. Added "${task.content}"${task.due ? ` due ${task.due.string}` : ""}.`;
-  },
-
-  list_tasks: async (args) => {
-    const data = await todoistGet("/tasks");
-    if (!data) return "Sorry, I couldn't reach your task list right now.";
-    let tasks = data.results ?? data;
-    const scope = (args.scope || "today").toLowerCase();
-    if (scope !== "all") {
-      // today + overdue = anything due today or earlier (client-side, reliable)
-      const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
-      tasks = tasks.filter((t) => t.due && t.due.date && t.due.date <= today);
-    }
-    if (!tasks.length) {
-      return scope === "all"
-        ? "You have no active tasks. You're clear."
-        : "Nothing due today or overdue. You're all caught up.";
-    }
-    const top = tasks.slice(0, 8).map((t) => t.content + (t.due ? ` (due ${t.due.string})` : ""));
-    const more = tasks.length > 8 ? ` Plus ${tasks.length - 8} more.` : "";
-    const n = tasks.length;
-    const noun = `task${n === 1 ? "" : "s"}`;
-    const phrase = scope === "all" ? `${n} active ${noun}` : `${n} ${noun} due or overdue`;
-    return `You have ${phrase}: ${top.join("; ")}.${more}`;
-  },
-
-  add_event: async (args) => {
-    const title = (args.title || "").trim();
-    if (!title) return "What should I call the event?";
-    // Resolve the spoken date/time server-side (no LLM date guessing).
-    const { date, time } = resolveWhen(args.when || args.date || "");
-    if (!date) return "I couldn't pin down the date. Try saying it like 'next Friday at 4pm' or 'June 6th at noon'.";
-    try {
-      const r = await caldavAddEvent(title, date, time, args.duration_mins || 60, args.calendar_name || null);
-      if (!r) return "Sorry, I couldn't reach your calendar.";
-      if (r.error === "calendar_not_found") {
-        return `I couldn't find a calendar called "${args.calendar_name}". Your calendars are: ${r.available.join(", ")}. Which one?`;
-      }
-      // Speak the resolved date back so Shawn can confirm it's right.
-      const spoken = new Date(date + "T00:00:00Z").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" });
-      return `Added "${title}" on ${spoken}${time ? ` at ${time}` : ""}${r.calendar ? `, to your ${r.calendar} calendar` : ""}.`;
-    } catch (e) {
-      return "Sorry, something went wrong adding that to your calendar.";
-    }
-  },
-
-  complete_task: async (args) => {
-    const q = (args.task_name || "").toLowerCase().trim();
-    if (!q) return "Which task should I mark done?";
-    const data = await todoistGet("/tasks");
-    if (!data) return "Sorry, I couldn't reach your task list.";
-    const tasks = data.results ?? data;
-    // All tasks whose content contains the phrase (catches duplicates); fall back to word overlap.
-    let matches = tasks.filter((t) => t.content.toLowerCase().includes(q));
-    if (!matches.length) {
-      const words = q.split(/\s+/).filter((w) => w.length > 2);
-      const m = tasks.find((t) => words.some((w) => t.content.toLowerCase().includes(w)));
-      if (m) matches = [m];
-    }
-    if (!matches.length) return `I couldn't find a task matching "${args.task_name}".`;
-    let done = 0;
-    for (const m of matches) { if (await todoistClose(m.id)) done++; }
-    if (done === 0) return "Sorry, I couldn't mark that complete.";
-    if (matches.length > 1) return `Done — there were ${matches.length} tasks matching that, and I marked all ${done} complete.`;
-    return `Done — marked "${matches[0].content}" complete.`;
-  },
-
-  get_schedule: async (args) => {
-    const days = args.days || 7;
-    try {
-      const events = await caldavListEvents(days);
-      if (!events.length) return `Nothing on your calendar in the next ${days} days.`;
-      const top = events.slice(0, 6).map((e) => `${e.summary} on ${e.label}`);
-      const more = events.length > 6 ? ` Plus ${events.length - 6} more.` : "";
-      return `You have ${events.length} event${events.length === 1 ? "" : "s"} coming up: ${top.join("; ")}.${more}`;
-    } catch (e) {
-      return "Sorry, I couldn't reach your calendar right now.";
-    }
-  },
-
-  save_note: async (args) => {
-    const note = (args.note || "").trim();
-    if (!note) return "What should I note down?";
-    try {
-      const ok = await githubAppendNote(note);
-      return ok ? "Got it — saved to your AIOS notes." : "Sorry, I couldn't save that note.";
-    } catch (e) {
-      return "Sorry, something went wrong saving that note.";
-    }
-  },
+  add_task: addTask,
+  list_tasks: listTasks,
+  complete_task: completeTask,
+  add_event: addEvent,
+  get_schedule: ({ days } = {}) => listEvents({ days }),
+  save_note: saveNote,
 };
-
-// ── Handler ────────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -344,13 +31,9 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const msg = req.body?.message || {};
-  // Vapi has used both keys across versions — handle both.
   const calls = msg.toolCallList || msg.toolCalls || msg.toolCallsList || [];
-
-  // Capture caller identity for the role layer (charter: build it in from line one).
   const callerNumber = msg.call?.customer?.number || msg.customer?.number || null;
-  const role = callerNumber && OWNER_NUMBERS.includes(callerNumber) ? "owner" : "owner"; // TODO: guest default once role layer lands
-  const ctx = { callerNumber, role };
+  const role = callerNumber && OWNER_NUMBERS.includes(callerNumber) ? "owner" : "owner"; // TODO: guest default w/ role layer
 
   const results = [];
   for (const call of calls) {
@@ -358,14 +41,14 @@ export default async function handler(req, res) {
     const fn = call.function || call;
     const name = fn.name;
     let args = fn.arguments ?? {};
-    if (typeof args === "string") {
-      try { args = JSON.parse(args); } catch { args = {}; }
-    }
+    if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = {}; } }
 
     let result;
-    if (TOOLS[name]) {
+    const connector = TOOLS[name];
+    if (connector) {
       try {
-        result = await TOOLS[name](args, ctx);
+        const r = await connector(args);
+        result = r?.message || (r?.ok ? "Done." : "Sorry, that didn't work.");
       } catch (e) {
         result = "Sorry, something went wrong running that.";
       }

@@ -1,6 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import nodemailer from "nodemailer";
 import { DAVClient } from "tsdav";
+// Shared capability layer — same connectors the voice + SMS channels use.
+import { addTask as cAddTask, listTasks as cListTasks, completeTask as cCompleteTask, addEvent as cAddEvent, listEvents as cListEvents, saveNote as cSaveNote } from "./_connectors.js";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const REPO = "shawn-randall/AIS-OS";
@@ -349,13 +351,14 @@ const TOOLS = [
   },
   {
     name: "list_tasks",
-    description: "List Shawn's active Todoist tasks. Optionally filter by a keyword or project name.",
+    description: "List Shawn's Todoist tasks. Use when he asks what's on his list, what's due, or what he needs to do.",
     input_schema: {
       type: "object",
       properties: {
-        filter: {
+        scope: {
           type: "string",
-          description: "Todoist filter string, e.g. 'today', 'p1', 'Ghost Notes'. Leave empty for all active tasks.",
+          enum: ["today", "all"],
+          description: "'today' = due today or overdue (default). 'all' = every active task.",
         },
       },
       required: [],
@@ -383,14 +386,13 @@ const TOOLS = [
   },
   {
     name: "complete_task",
-    description: "Mark a Todoist task as complete by its ID.",
+    description: "Mark a task complete / done. Use when Shawn says he finished or completed a task.",
     input_schema: {
       type: "object",
       properties: {
-        task_id: { type: "string", description: "The task ID from list_tasks" },
-        task_name: { type: "string", description: "Task name for confirmation message" },
+        task_name: { type: "string", description: "The task as Shawn refers to it, e.g. 'call Jules'. The system finds the best match." },
       },
-      required: ["task_id", "task_name"],
+      required: ["task_name"],
     },
   },
   {
@@ -446,16 +448,27 @@ const TOOLS = [
   },
   {
     name: "add_event",
-    description: "Add a new event to Shawn's iCloud calendar.",
+    description: "Add an event to Shawn's calendar. Use when he asks to schedule, book, or add something.",
     input_schema: {
       type: "object",
       properties: {
         title: { type: "string", description: "Event title" },
-        date: { type: "string", description: "Date in YYYY-MM-DD format" },
-        time: { type: "string", description: "Start time in HH:MM (24-hour), e.g. '14:30'. Omit for all-day." },
+        when: { type: "string", description: "Date and time exactly as Shawn said it — 'next Friday at 4pm', 'Wednesday the 3rd', 'June 6th at noon'. Don't compute the date yourself; pass his words." },
+        calendar_name: { type: "string", description: "Which calendar, if specified — e.g. 'Music', 'Acting', 'Work'. Omit for his default (Home) calendar." },
         duration_mins: { type: "integer", description: "Duration in minutes (default 60)." },
       },
-      required: ["title", "date"],
+      required: ["title", "when"],
+    },
+  },
+  {
+    name: "save_note",
+    description: "Save a quick note or piece of info for Shawn. Use when he says 'remember that...', 'note that...', or wants to capture a thought or detail.",
+    input_schema: {
+      type: "object",
+      properties: {
+        note: { type: "string", description: "The note text to save." },
+      },
+      required: ["note"],
     },
   },
 ];
@@ -470,30 +483,15 @@ async function executeTool(name, input, savedFiles) {
     return ok ? `Saved ${file} to GitHub.` : `Failed to save ${file}.`;
   }
 
-  if (name === "list_tasks") {
-    const data = await todoistGet("/tasks", input.filter ? { filter: input.filter } : {});
-    if (!data) return "Failed to fetch tasks.";
-    const tasks = data.results ?? data;
-    if (!tasks.length) return "No active tasks found.";
-    return tasks
-      .map((t) => `[${t.id}] ${t.content}${t.due ? ` (due ${t.due.string})` : ""}`)
-      .join("\n");
-  }
+  // ── Shared connectors (same logic as voice + SMS) ──
+  if (name === "list_tasks")   return (await cListTasks({ scope: input.scope })).message;
+  if (name === "add_task")     return (await cAddTask(input)).message;
+  if (name === "complete_task") return (await cCompleteTask({ task_name: input.task_name })).message;
+  if (name === "list_events")  return (await cListEvents({ days: input.days })).message;
+  if (name === "add_event")    return (await cAddEvent(input)).message;
+  if (name === "save_note")    return (await cSaveNote({ note: input.note })).message;
 
-  if (name === "add_task") {
-    const body = { content: input.content };
-    if (input.due_string) body.due_string = input.due_string;
-    if (input.priority) body.priority = input.priority;
-    const task = await todoistPost("/tasks", body);
-    if (!task) return "TODOIST_ERROR: Task was NOT added. The API call failed — token may be missing in Vercel. Tell the user: task was not added, there is a configuration issue.";
-    return `TODOIST_SUCCESS: Task added with ID ${task.id}. Content: "${task.content}"${task.due ? ` due ${task.due.string}` : ""}.`;
-  }
-
-  if (name === "complete_task") {
-    const res = await todoistPost(`/tasks/${input.task_id}/close`);
-    return res !== null ? `Completed: "${input.task_name}"` : `Failed to complete task.`;
-  }
-
+  // ── Phone-specific (email lives in this adapter for now; migrate to connectors next) ──
   if (name === "read_email") {
     return await readEmail(input.account, input.count || 5);
   }
@@ -503,14 +501,6 @@ async function executeTool(name, input, savedFiles) {
     if (!input.to || !input.to.trim()) return "SEND_BLOCKED: No recipient. Ask Shawn who to send to.";
     if (!input.body || !input.body.trim()) return "SEND_BLOCKED: No body. Draft the email content first.";
     return await sendEmail(input.to, input.subject, input.body, input.from_account);
-  }
-
-  if (name === "list_events") {
-    return await listEvents(input.days || 7);
-  }
-
-  if (name === "add_event") {
-    return await addEvent(input.title, input.date, input.time, input.duration_mins || 60);
   }
 
   return "Unknown tool.";
