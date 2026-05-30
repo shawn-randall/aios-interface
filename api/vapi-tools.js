@@ -6,6 +6,8 @@
 // Add a capability = add one entry to TOOLS below. Each is a self-contained
 // connector. Keep this file free of Vapi-specific business logic beyond parsing.
 
+import { DAVClient } from "tsdav";
+
 const TODOIST_TOKEN = process.env.TODOIST_API_TOKEN;
 const TODOIST_BASE = "https://api.todoist.com/api/v1";
 
@@ -38,7 +40,6 @@ async function todoistGet(path, params = {}) {
 
 // Calendar (iCloud CalDAV) — reused from the web app's add_event connector.
 async function caldavAddEvent(title, date, time, durationMins = 60) {
-  const { DAVClient } = await import("tsdav");
   const davClient = new DAVClient({
     serverUrl: "https://caldav.icloud.com",
     credentials: { username: process.env.APPLE_ID, password: process.env.APPLE_APP_PASSWORD },
