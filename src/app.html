@@ -144,6 +144,36 @@
 
     #send-btn svg { width: 18px; height: 18px; fill: #fff; }
 
+    #mic-btn {
+      background: #1e1e1e;
+      border: 1px solid #333;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    #mic-btn svg { width: 18px; height: 18px; fill: #aaa; }
+    #mic-btn.listening { background: #b3261e; border-color: #b3261e; animation: pulse 1.2s infinite; }
+    #mic-btn.listening svg { fill: #fff; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+    #voice-toggle {
+      background: none;
+      border: 1px solid #333;
+      color: #888;
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-right: 8px;
+    }
+    #voice-toggle.on { color: #1a6cf6; border-color: #1a6cf6; }
+
     #empty-state {
       flex: 1;
       display: flex;
@@ -164,7 +194,10 @@
 
 <div id="header">
   <h1>AIOS</h1>
-  <button id="clear-btn" onclick="clearChat()">Clear</button>
+  <div style="display:flex; align-items:center;">
+    <button id="voice-toggle" onclick="toggleVoice()">🔇 Voice</button>
+    <button id="clear-btn" onclick="clearChat()">Clear</button>
+  </div>
 </div>
 
 <div id="messages">
@@ -175,6 +208,9 @@
 </div>
 
 <div id="input-area">
+  <button id="mic-btn" onclick="toggleMic()" title="Tap to speak">
+    <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
+  </button>
   <textarea id="input" placeholder="Ask anything..." rows="1"></textarea>
   <button id="send-btn" onclick="sendMessage()">
     <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
@@ -190,6 +226,67 @@
   const messagesEl = document.getElementById("messages");
   const inputEl    = document.getElementById("input");
   const sendBtn    = document.getElementById("send-btn");
+  const micBtn     = document.getElementById("mic-btn");
+  const voiceToggle = document.getElementById("voice-toggle");
+
+  // ── Voice output (text-to-speech) ──────────────────────────────────────────
+  let voiceOn = localStorage.getItem("aios_voice") === "on";
+  function renderVoiceToggle() {
+    voiceToggle.textContent = voiceOn ? "🔊 Voice" : "🔇 Voice";
+    voiceToggle.classList.toggle("on", voiceOn);
+  }
+  renderVoiceToggle();
+  function toggleVoice() {
+    voiceOn = !voiceOn;
+    localStorage.setItem("aios_voice", voiceOn ? "on" : "off");
+    renderVoiceToggle();
+    if (!voiceOn && window.speechSynthesis) window.speechSynthesis.cancel();
+  }
+  function speak(text) {
+    if (!voiceOn || !window.speechSynthesis) return;
+    // Strip markdown so it reads cleanly
+    const clean = text
+      .replace(/[#*_`>~\-]/g, " ")
+      .replace(/\[(.*?)\]\(.*?\)/g, "$1")
+      .replace(/\s+/g, " ")
+      .trim();
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(clean);
+    u.rate = 1.0; u.pitch = 1.0;
+    window.speechSynthesis.speak(u);
+  }
+
+  // ── Voice input (speech-to-text) ───────────────────────────────────────────
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recognition = null, listening = false;
+  if (SR) {
+    recognition = new SR();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.onresult = (e) => {
+      const transcript = e.results[0][0].transcript;
+      inputEl.value = transcript;
+      stopMic();
+      sendMessage();
+    };
+    recognition.onerror = () => stopMic();
+    recognition.onend = () => stopMic();
+  } else {
+    // No speech recognition (e.g. iOS Safari) — hide mic, point to keyboard dictation
+    micBtn.style.display = "none";
+  }
+  function toggleMic() {
+    if (!recognition) return;
+    listening ? stopMic() : startMic();
+  }
+  function startMic() {
+    try { recognition.start(); listening = true; micBtn.classList.add("listening"); } catch (_) {}
+  }
+  function stopMic() {
+    listening = false; micBtn.classList.remove("listening");
+    try { recognition.stop(); } catch (_) {}
+  }
 
   // Auto-reload after 30 min of inactivity — ensures fresh code + fresh context
   const INACTIVITY_MS = 30 * 60 * 1000;
@@ -262,6 +359,7 @@
           display += "\n\n_tools: none called_";
         }
         addMessage("assistant", display);
+        speak(data.reply);
         history.push({ role: "user", content: text });
         history.push({ role: "assistant", content: data.reply });
         if (history.length > 20) history = history.slice(-20);
