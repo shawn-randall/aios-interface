@@ -103,8 +103,10 @@ const TOOLS = {
     }
     const top = tasks.slice(0, 8).map((t) => t.content + (t.due ? ` (due ${t.due.string})` : ""));
     const more = tasks.length > 8 ? ` Plus ${tasks.length - 8} more.` : "";
-    const label = scope === "all" ? "active task" : "due or overdue";
-    return `You have ${tasks.length} ${label}${tasks.length === 1 ? "" : "s"}: ${top.join("; ")}.${more}`;
+    const n = tasks.length;
+    const noun = `task${n === 1 ? "" : "s"}`;
+    const phrase = scope === "all" ? `${n} active ${noun}` : `${n} ${noun} due or overdue`;
+    return `You have ${phrase}: ${top.join("; ")}.${more}`;
   },
 
   add_event: async (args) => {
