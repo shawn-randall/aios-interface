@@ -179,7 +179,8 @@ const TOOLS = {
       const r = await caldavAddEvent(title, date, time, args.duration_mins || 60);
       if (!r) return "Sorry, I couldn't reach your calendar.";
       // Speak the resolved date back so Shawn can confirm it's right.
-      const spoken = new Date(date + "T00:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "America/New_York" });
+      // Parse as UTC + display in UTC so the YYYY-MM-DD never shifts a day.
+      const spoken = new Date(date + "T00:00:00Z").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" });
       return `Added "${title}" on ${spoken}${time ? ` at ${time}` : ""}.`;
     } catch (e) {
       return "Sorry, something went wrong adding that to your calendar.";
