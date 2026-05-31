@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 // Shared capability layer — same connectors the voice + SMS channels use.
-import { addTask as cAddTask, listTasks as cListTasks, completeTask as cCompleteTask, addEvent as cAddEvent, listEvents as cListEvents, listCalendars as cListCalendars, saveNote as cSaveNote, readEmail as cReadEmail, sendEmail as cSendEmail } from "./_connectors.js";
+import { addTask as cAddTask, listTasks as cListTasks, completeTask as cCompleteTask, addEvent as cAddEvent, deleteEvent as cDeleteEvent, listEvents as cListEvents, listCalendars as cListCalendars, saveNote as cSaveNote, readEmail as cReadEmail, sendEmail as cSendEmail } from "./_connectors.js";
 // Same access-control layer voice + SMS use. Web is Shawn's private deployment,
 // so the role is always owner — but routing through resolveRole keeps the gate
 // uniform across every channel (defense in depth; SMS will reuse it verbatim).
@@ -114,6 +114,11 @@ const TOOLS = [
           enum: [1, 2, 3, 4],
           description: "1 = normal, 2 = medium, 3 = high, 4 = urgent",
         },
+        labels: {
+          type: "array",
+          items: { type: "string" },
+          description: "Todoist labels to flag the task with. When Shawn says to label, tag, or flag a task (e.g. 'flag it for AIOS', 'label it aios'), pass [\"aios\"] here — do NOT put the label in the task name. Omit if no label.",
+        },
       },
       required: ["content"],
     },
@@ -186,6 +191,18 @@ const TOOLS = [
     input_schema: { type: "object", properties: {}, required: [] },
   },
   {
+    name: "delete_event",
+    description: "Remove/cancel an event from Shawn's calendar. Use when he asks to delete, remove, or cancel a calendar event. Searches all his calendars by title; if several match, it lists them so he can pick the day.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "The event name to remove, as Shawn refers to it." },
+        when: { type: "string", description: "The day of the event, if he says it (e.g. 'Monday', 'June 6th'), to disambiguate when several match. Omit if not given." },
+      },
+      required: ["title"],
+    },
+  },
+  {
     name: "add_event",
     description: "Add an event to Shawn's calendar. Use when he asks to schedule, book, or add something.",
     input_schema: {
@@ -233,6 +250,7 @@ async function executeTool(name, input, savedFiles) {
   if (name === "list_events")  return (await cListEvents({ days: input.days })).message;
   if (name === "list_calendars") return (await cListCalendars()).message;
   if (name === "add_event")    return (await cAddEvent(input)).message;
+  if (name === "delete_event") return (await cDeleteEvent({ title: input.title, when: input.when })).message;
   if (name === "save_note")    return (await cSaveNote({ note: input.note })).message;
 
   if (name === "read_email")   return (await cReadEmail({ account: input.account, count: input.count })).message;

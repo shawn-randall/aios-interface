@@ -129,7 +129,12 @@ export async function addTask({ content, due_string, priority, labels } = {}) {
   const body = { content };
   if (due_string) body.due_string = due_string;
   if (priority) body.priority = priority;
-  if (labels && labels.length) body.labels = labels;
+  if (labels && labels.length) {
+    // Apply REAL Todoist labels (strip a leading "@" if the model included it,
+    // e.g. "@aios" → "aios"). This is the proper flag, not text in the title.
+    const clean = labels.map((l) => String(l).replace(/^@+/, "").trim()).filter(Boolean);
+    if (clean.length) body.labels = clean;
+  }
   const task = await tdPost("/tasks", body);
   if (!task) return { ok: false, message: "I couldn't add that task — a problem reaching Todoist." };
   return { ok: true, data: task, message: `Added "${task.content}"${task.due ? ` due ${task.due.string}` : ""}.` };
@@ -253,6 +258,51 @@ export async function listEvents({ days = 7 } = {}) {
   const top = events.slice(0, 8).map((e) => `${e.summary} on ${e.label}`);
   const more = events.length > 8 ? ` Plus ${events.length - 8} more.` : "";
   return { ok: true, data: events, message: `You have ${events.length} event${events.length === 1 ? "" : "s"} coming up: ${top.join("; ")}.${more}` };
+}
+
+export async function deleteEvent({ title, when } = {}) {
+  title = (title || "").trim();
+  if (!title) return { ok: false, message: "Which event should I remove?" };
+  const c = await caldavClient();
+  const calendars = await c.fetchCalendars();
+  const eventCals = calendars.filter((cal) => {
+    const comps = (cal.components || []).map((x) => String(x).toUpperCase());
+    return comps.length === 0 || comps.includes("VEVENT");
+  });
+  // Search a generous window (last week through ~4 months out).
+  const start = new Date(Date.now() - 7 * 864e5);
+  const end = new Date(Date.now() + 120 * 864e5);
+  const q = title.toLowerCase();
+  const wantDate = when ? resolveWhen(when).date : null;
+  const matches = [];
+  for (const cal of eventCals) {
+    try {
+      const objs = await c.fetchCalendarObjects({ calendar: cal, timeRange: { start: start.toISOString(), end: end.toISOString() } });
+      for (const o of objs) {
+        const data = (o.data || "").replace(/\r\n[ \t]/g, "").replace(/\n[ \t]/g, "");
+        let summary = (data.match(/SUMMARY:(.*)/) || [])[1]?.trim() || "";
+        summary = summary.replace(/\\,/g, ",").replace(/\\;/g, ";").replace(/\\n/gi, " ").replace(/\\\\/g, "\\");
+        if (!summary.toLowerCase().includes(q)) continue;
+        const dt = (data.match(/DTSTART[^:]*:(.*)/) || [])[1]?.trim() || "";
+        const m = dt.replace(/\s/g, "").match(/(\d{4})(\d{2})(\d{2})/);
+        const isoDate = m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+        const label = isoDate ? new Date(isoDate + "T00:00:00Z").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" }) : "";
+        matches.push({ obj: o, summary, isoDate, label, cal: cal.displayName });
+      }
+    } catch (_) {}
+  }
+  // If a date was given, prefer events on that day to disambiguate.
+  let scoped = wantDate ? matches.filter((x) => x.isoDate === wantDate) : matches;
+  if (!scoped.length) scoped = matches;
+
+  if (!scoped.length) return { ok: false, message: `I couldn't find an event matching "${title}".` };
+  if (scoped.length > 1) {
+    const list = scoped.slice(0, 5).map((x) => `${x.summary} on ${x.label}`).join("; ");
+    return { ok: false, message: `I found ${scoped.length} events matching that: ${list}. Which day's should I remove?`, data: scoped.map((x) => ({ summary: x.summary, label: x.label })) };
+  }
+  const t = scoped[0];
+  await c.deleteCalendarObject({ calendarObject: t.obj });
+  return { ok: true, data: { summary: t.summary, date: t.isoDate, calendar: t.cal }, message: `Removed "${t.summary}"${t.label ? ` on ${t.label}` : ""} from your ${t.cal} calendar.` };
 }
 
 export async function listCalendars() {
