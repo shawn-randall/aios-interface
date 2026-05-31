@@ -537,22 +537,30 @@ export async function sendEmail({ to, subject, body, from_account } = {}) {
 const PUBLIC_INFO = process.env.PUBLIC_BOOKING_INFO
   || "For booking and inquiries, email shawnalfredrandall@gmail.com and Shawn will get back to you.";
 
-export async function leaveMessage({ name, number, topic } = {}) {
+// `caller_id` is the real caller's number (from caller ID), injected by the
+// channel — so we always record a number, even if the caller never says one.
+export async function leaveMessage({ name, number, topic, caller_id } = {}) {
   const who = (name || "").trim() || "Someone";
   const re = (topic || "").trim();
-  const back = (number || "").trim();
-  const content = `📞 Message from ${who}${back ? ` (${back})` : ""}${re ? `: ${re}` : ""}`;
+  const stated = (number || "").trim();
+  const cid = (caller_id || "").trim();
+  const back = stated || cid;
+  const tag = back ? ` (${back}${!stated && cid ? ", caller ID" : ""})` : "";
+  const content = `📞 Message from ${who}${tag}${re ? `: ${re}` : ""}`;
   const r = await addTask({ content, labels: ["aios"] });
   return r.ok
     ? { ok: true, data: r.data, message: `Got it — I'll let Shawn know${re ? ` about ${re}` : ""}. Anything else?` }
     : { ok: false, message: "I had trouble saving that message. Could you try again in a moment?" };
 }
 
-export async function requestCallback({ name, number } = {}) {
+export async function requestCallback({ name, number, caller_id } = {}) {
   const who = (name || "").trim() || "a caller";
-  const back = (number || "").trim();
+  const stated = (number || "").trim();
+  const cid = (caller_id || "").trim();
+  const back = stated || cid;
   if (!back) return { ok: false, message: "What's the best number for Shawn to call you back on?" };
-  const r = await addTask({ content: `📞 Call ${who} back at ${back}`, labels: ["aios"] });
+  const tag = !stated && cid ? " (caller ID)" : "";
+  const r = await addTask({ content: `📞 Call ${who} back at ${back}${tag}`, labels: ["aios"] });
   return r.ok
     ? { ok: true, data: r.data, message: `Done — I've asked Shawn to call ${who} back at ${back}.` }
     : { ok: false, message: "I couldn't log that callback. Mind trying again?" };

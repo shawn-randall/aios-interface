@@ -44,6 +44,7 @@ export default async function handler(req, res) {
   const msg = req.body?.message || {};
   const calls = msg.toolCallList || msg.toolCalls || msg.toolCallsList || [];
   const callId = msg.call?.id || msg.callId || null; // binds the session token to THIS call
+  const callerNumber = msg.call?.customer?.number || msg.customer?.number || null; // caller ID, captured automatically
 
   const results = [];
   for (const call of calls) {
@@ -56,6 +57,9 @@ export default async function handler(req, res) {
     // session_token is the proof of a verified unlock, minted server-side and
     // threaded by the model on owner actions. Strip it before the connector runs.
     const { session_token: sessionToken, ...toolArgs } = args || {};
+    // Hand the real caller ID to connectors that want it (e.g. receptionist
+    // tools), so we capture a number even when the caller never says one.
+    toolArgs.caller_id = callerNumber;
 
     let result;
 
