@@ -1,55 +1,123 @@
-// ── AIOS Roles — the shared access-control layer ───────────────────────────
+// ── AIOS Roles & Auth — the shared access-control layer ────────────────────
 //
 // THE single source of truth for WHO can do WHAT. Every channel adapter
 // (voice → vapi-tools.js, SMS → sms.js, web chat → v2.js) resolves the caller's
-// role here and filters the tools it will run against the same allow-lists.
-// Improve the policy once → every door enforces it identically.
+// role here and filters tools against the same allow-lists. Improve the policy
+// once → every door enforces it identically.
 //
-// Security model (see projects/voice-agent.md):
-//   - Vapi runs ONE assistant; the model can be talked around, so THIS code is
-//     the real gate. Channels MUST refuse a tool when isToolAllowed() is false.
-//   - Owner = a known phone number (frictionless) OR the spoken codeword (works
-//     from any phone, defeats caller-ID spoofing).
-//   - Everyone else = guest (a receptionist — message + pending booking only).
-//   - FAIL CLOSED: missing/garbled identity resolves to guest, never owner.
+// Security model (hardened after a live social-engineering test, 2026-05-30):
+//   - Owner access is NOT granted by phone number. A call merged/forwarded/on
+//     speaker would otherwise hand owner to whoever is talking. Number alone is
+//     worthless here.
+//   - Owner unlocks ONLY via an explicit handshake: the caller asks to unlock,
+//     the agent challenges, the caller proves it with a PIN (keypad) and/or a
+//     spoken passphrase. A secret that merely comes up in conversation does
+//     nothing — the model cannot unlock on its own say-so.
+//   - The SERVER decides unlocked-ness, not the model (the model was shown to
+//     hallucinate "you're recognized"). On a verified unlock the server mints a
+//     signed, call-scoped, expiring session token; owner tools require it. The
+//     model can carry the token but cannot forge one.
+//   - FAIL CLOSED: no valid token → guest.
 //
-// Config as data (never committed): OWNER_NUMBERS + OWNER_CODEWORD live in env.
+// Config as data (env, never committed):
+//   OWNER_PIN          digits for the keypad method      (enables "pin")
+//   OWNER_CODEWORD     spoken passphrase                 (enables "passphrase")
+//   OWNER_AUTH_MODE    "any" (default) | "all" | "off"
+//     any = either enabled method unlocks
+//     all = every enabled method required (2FA)
+//     off = owner unlock disabled entirely
+//   AUTH_SECRET        HMAC key for session tokens (falls back to a stable
+//                      server secret so it's optional)
 
-// Reduce a phone number to its comparable core: digits only, US 11→10 (drop
-// leading country "1"). Makes "+1 (646) 680-9460", "16466809460", and
-// "646-680-9460" all match.
+import crypto from "crypto";
+
+// ── helpers ─────────────────────────────────────────────────────────────────
 export function normalizeNumber(n) {
   if (!n) return "";
   let d = String(n).replace(/\D/g, "");
   if (d.length === 11 && d.startsWith("1")) d = d.slice(1);
   return d;
 }
-
-// Codewords compared loosely: case-insensitive, punctuation/space stripped, so
-// "Blue Heron." spoken == "blueheron" in env.
-function normalizeWord(w) {
+function normWord(w) {
   return String(w || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
+function normPin(p) {
+  return String(p || "").replace(/\D/g, "");
+}
 
-const OWNER_NUMBERS = new Set(
-  (process.env.OWNER_NUMBERS || "")
-    .split(",")
-    .map((s) => normalizeNumber(s))
-    .filter(Boolean)
-);
+// ── auth config ──────────────────────────────────────────────────────────────
+const OWNER_PIN = normPin(process.env.OWNER_PIN || "");
+const OWNER_CODEWORD = normWord(process.env.OWNER_CODEWORD || "");
+const AUTH_MODE = (process.env.OWNER_AUTH_MODE || "any").toLowerCase();
+// Token-signing key. Prefer an explicit AUTH_SECRET; else reuse a stable
+// server-only secret so tokens still can't be forged by the model/callers.
+const AUTH_SECRET =
+  process.env.AUTH_SECRET ||
+  process.env.TODOIST_API_TOKEN ||
+  process.env.GITHUB_TOKEN ||
+  "aios-fallback-signing-key";
+const TOKEN_TTL_SECONDS = 2 * 60 * 60; // a generous single-call window
 
-const OWNER_CODEWORD = normalizeWord(process.env.OWNER_CODEWORD || "");
+// Which methods are live (a method is enabled iff its secret is set).
+export function enabledMethods() {
+  const m = [];
+  if (OWNER_PIN) m.push("pin");
+  if (OWNER_CODEWORD) m.push("passphrase");
+  return m;
+}
 
-// ── Tool allow-lists (the contract every channel filters against) ───────────
+// Verify the secret(s) a caller supplied during the unlock handshake.
+// Respects AUTH_MODE. Returns true only if the policy is satisfied.
+export function verifyOwnerSecret({ pin, passphrase } = {}) {
+  if (AUTH_MODE === "off") return false;
+  const methods = enabledMethods();
+  if (!methods.length) return false; // nothing configured → cannot unlock
+
+  const pinOk = OWNER_PIN && normPin(pin) === OWNER_PIN;
+  const wordOk = OWNER_CODEWORD && normWord(passphrase) === OWNER_CODEWORD;
+
+  if (AUTH_MODE === "all") {
+    // every enabled method must pass
+    return methods.every((mth) => (mth === "pin" ? pinOk : wordOk));
+  }
+  // "any": at least one enabled method passes
+  return Boolean(pinOk || wordOk);
+}
+
+// ── call-scoped session tokens (stateless, non-forgeable) ────────────────────
+function sign(payload) {
+  return crypto.createHmac("sha256", AUTH_SECRET).update(payload).digest("base64url");
+}
+// Bind the token to this call id + an expiry. The call id is NOT stored in the
+// token (supplied from the live call at verify), so a token can't be replayed
+// on a different call.
+export function issueSessionToken(callId) {
+  const exp = Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS;
+  const sig = sign(`${callId || "nocall"}|${exp}`);
+  return `${exp}.${sig}`;
+}
+export function verifySessionToken(token, callId) {
+  if (!token || typeof token !== "string" || !token.includes(".")) return false;
+  const [expStr, sig] = token.split(".");
+  const exp = parseInt(expStr, 10);
+  if (!exp || Math.floor(Date.now() / 1000) > exp) return false;
+  const expected = sign(`${callId || "nocall"}|${exp}`);
+  // constant-time compare
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// ── tool allow-lists ─────────────────────────────────────────────────────────
+// unlock_owner + public_info are the doors a guest may use. Everything else is
+// owner-only.
 export const GUEST_TOOLS = new Set([
+  "unlock_owner",
   "leave_message",
   "request_callback",
   "request_calendar_hold",
   "public_info",
 ]);
-
-// Owner is a superset — everything across every channel, plus the guest tools.
-// (Voice uses get_schedule; web uses list_events + save_context — all owner-only.)
 export const OWNER_TOOLS = new Set([
   "add_task",
   "list_tasks",
@@ -64,16 +132,11 @@ export const OWNER_TOOLS = new Set([
   ...GUEST_TOOLS,
 ]);
 
-// Resolve a caller's role. `channel` is "voice" | "sms" | "web".
-export function resolveRole({ channel, callerNumber, ownerKey } = {}) {
-  if (channel === "web") return "owner"; // Shawn's private deployment
-
-  const num = normalizeNumber(callerNumber);
-  if (num && OWNER_NUMBERS.has(num)) return "owner";
-
-  const key = normalizeWord(ownerKey);
-  if (key && OWNER_CODEWORD && key === OWNER_CODEWORD) return "owner";
-
+// Resolve a caller's role. Number never grants owner anymore — only a valid,
+// in-call session token does (web is the trusted private deployment).
+export function resolveRole({ channel, sessionToken, callId } = {}) {
+  if (channel === "web") return "owner";
+  if (verifySessionToken(sessionToken, callId)) return "owner";
   return "guest"; // fail closed
 }
 

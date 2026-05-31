@@ -11,7 +11,7 @@ import {
   addTask, listTasks, completeTask, addEvent, listEvents, saveNote,
   leaveMessage, requestCallback, requestCalendarHold, publicInfo,
 } from "./_connectors.js";
-import { resolveRole, isToolAllowed } from "./_roles.js";
+import { resolveRole, isToolAllowed, verifyOwnerSecret, issueSessionToken } from "./_roles.js";
 
 // name → connector. Owner tools + guest (receptionist) tools both live here;
 // _roles.js decides which the current caller may actually run, and the handler
@@ -40,7 +40,7 @@ export default async function handler(req, res) {
 
   const msg = req.body?.message || {};
   const calls = msg.toolCallList || msg.toolCalls || msg.toolCallsList || [];
-  const callerNumber = msg.call?.customer?.number || msg.customer?.number || null;
+  const callId = msg.call?.id || msg.callId || null; // binds the session token to THIS call
 
   const results = [];
   for (const call of calls) {
@@ -50,14 +50,28 @@ export default async function handler(req, res) {
     let args = fn.arguments ?? {};
     if (typeof args === "string") { try { args = JSON.parse(args); } catch { args = {}; } }
 
-    // owner_key is the spoken codeword the model threads on owner actions when
-    // the caller isn't on a known number. Strip it before the connector runs.
-    const { owner_key: ownerKey, ...toolArgs } = args || {};
-
-    // THE GATE. Role = known number OR valid codeword; else guest (fail closed).
-    const role = resolveRole({ channel: "voice", callerNumber, ownerKey });
+    // session_token is the proof of a verified unlock, minted server-side and
+    // threaded by the model on owner actions. Strip it before the connector runs.
+    const { session_token: sessionToken, ...toolArgs } = args || {};
 
     let result;
+
+    // unlock_owner is the handshake door — verify the secret(s) here and, on
+    // success, mint a call-scoped token. The MODEL never decides owner-ness.
+    if (name === "unlock_owner") {
+      const ok = verifyOwnerSecret({ pin: toolArgs.pin, passphrase: toolArgs.passphrase });
+      if (ok) {
+        const token = issueSessionToken(callId);
+        result = `OWNER_ACCESS_GRANTED. session_token=${token}. Say only: "You're unlocked." Attach this session_token to every owner action for the rest of this call. NEVER say the token aloud.`;
+      } else {
+        result = `OWNER_ACCESS_DENIED. Stay in guest mode. Tell the caller that didn't match and offer to try again or take a message. Do not reveal which part was wrong.`;
+      }
+      results.push({ toolCallId: id, result });
+      continue;
+    }
+
+    // THE GATE. Owner only via a valid in-call token; else guest (fail closed).
+    const role = resolveRole({ channel: "voice", sessionToken, callId });
     const connector = TOOLS[name];
     if (!connector) {
       result = `Unknown tool: ${name}`;
