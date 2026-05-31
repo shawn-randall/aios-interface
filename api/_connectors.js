@@ -80,11 +80,46 @@ async function tdClose(id) {
 // Resolve a spoken/typed phrase ("next Friday at 4pm", "Wednesday the 3rd",
 // "June 6th at noon") to { date: 'YYYY-MM-DD', time: 'HH:MM' | null } using the
 // real current date in NY. chrono-node primary; never trust an LLM to do dates.
+// Chrono can't parse bare day-of-month references ("the 8th", "Monday the
+// eighth") — it ignores the number (and sometimes the time). So before parsing,
+// turn spoken ordinals into digits and inject the correct month/year, e.g.
+// "Monday the eighth at 7pm" → "Monday June 8, 2026 at 7pm".
+const ORD_WORDS = {
+  first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10,
+  eleventh: 11, twelfth: 12, thirteenth: 13, fourteenth: 14, fifteenth: 15, sixteenth: 16, seventeenth: 17,
+  eighteenth: 18, nineteenth: 19, twentieth: 20, "twenty-first": 21, "twenty-second": 22, "twenty-third": 23,
+  "twenty-fourth": 24, "twenty-fifth": 25, "twenty-sixth": 26, "twenty-seventh": 27, "twenty-eighth": 28,
+  "twenty-ninth": 29, thirtieth: 30, "thirty-first": 31,
+};
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+function normalizeWhen(phrase) {
+  if (!phrase) return phrase;
+  let s = String(phrase);
+  // compound word ordinals ("twenty first" / "twenty-first") → "21st"
+  s = s.replace(/\b(twenty|thirty)[\s-](first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)\b/gi,
+    (m) => { const n = ORD_WORDS[m.toLowerCase().replace(/\s+/g, "-")]; return n ? `${n}th` : m; });
+  // single word ordinals ("eighth" → "8th")
+  s = s.replace(/\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|thirtieth)\b/gi,
+    (m) => { const n = ORD_WORDS[m.toLowerCase()]; return n ? `${n}th` : m; });
+  // If a month is already named, chrono can handle it — leave alone.
+  if (/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(s)) return s;
+  // Inject the right month for a bare day-of-month ("the 8th" → "June 8, 2026").
+  s = s.replace(/\b(?:the\s+)?(\d{1,2})(st|nd|rd|th)\b/i, (m, d) => {
+    const day = parseInt(d, 10);
+    if (day < 1 || day > 31) return m;
+    const ref = new Date(new Date().toLocaleString("en-US", { timeZone: CALENDAR_TZ }));
+    let y = ref.getFullYear(), mo = ref.getMonth();
+    if (day < ref.getDate()) { mo += 1; if (mo > 11) { mo = 0; y += 1; } } // day already passed → next month
+    return `${MONTH_NAMES[mo]} ${day}, ${y}`;
+  });
+  return s;
+}
+
 export function resolveWhen(phrase) {
   if (!phrase) return { date: null, time: null };
   try {
     const ref = new Date(new Date().toLocaleString("en-US", { timeZone: CALENDAR_TZ }));
-    const results = chrono.parse(phrase, ref, { forwardDate: true });
+    const results = chrono.parse(normalizeWhen(phrase), ref, { forwardDate: true });
     if (results && results.length) {
       const s = results[0].start;
       const y = s.get("year"), mo = s.get("month"), d = s.get("day");
@@ -217,7 +252,7 @@ function buildVEvent({ title, date, time, durationMins = 60, allDay = false }) {
 function parseWhenParts(phrase) {
   try {
     const ref = new Date(new Date().toLocaleString("en-US", { timeZone: CALENDAR_TZ }));
-    const r = chrono.parse(phrase || "", ref, { forwardDate: true });
+    const r = chrono.parse(normalizeWhen(phrase || ""), ref, { forwardDate: true });
     if (!r || !r.length) return { date: null, time: null, hasDate: false, hasTime: false };
     const s = r[0].start;
     const hasDate = s.isCertain("day") || s.isCertain("month") || s.isCertain("weekday");
