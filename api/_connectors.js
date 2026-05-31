@@ -289,8 +289,14 @@ async function findEvents(c, title, dayPhrase) {
 export async function addEvent({ title, when, calendar_name, duration_mins = 60 } = {}) {
   title = (title || "").trim();
   if (!title) return { ok: false, message: "What should I call the event?" };
-  const { date, time } = resolveWhen(when || "");
+  const parts = parseWhenParts(when || "");
+  const { date, time } = parts;
   if (!date) return { ok: false, message: "I couldn't pin down the date. Try 'next Friday at 4pm' or 'June 6th at noon'." };
+  // A time but no DAY → don't silently assume today (that's how an event landed
+  // on the wrong date before). Ask which day instead.
+  if (parts.hasTime && !parts.hasDate) {
+    return { ok: false, message: `What day should I put "${title}" on? You gave me a time but not a day.` };
+  }
 
   const c = await caldavClient();
   const calendars = await c.fetchCalendars();
