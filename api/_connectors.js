@@ -168,7 +168,13 @@ export async function completeTask({ task_name } = {}) {
   }
   if (!matches.length) return { ok: false, message: `I couldn't find a task matching "${task_name}".` };
   let done = 0;
-  for (const m of matches) { if (await tdClose(m.id)) done++; }
+  for (const m of matches) {
+    if (await tdClose(m.id)) {
+      done++;
+      // Record AIOS-handled @aios items so the morning brief can report them.
+      if ((m.labels || []).includes("aios")) await logAiosActivity(`Completed: ${m.content}`);
+    }
+  }
   if (done === 0) return { ok: false, message: "I couldn't mark that complete." };
   const message = matches.length > 1
     ? `There were ${matches.length} tasks matching that — I marked all ${done} complete.`
@@ -264,6 +270,29 @@ export async function saveNote({ note } = {}) {
   if (sha) body.sha = sha;
   const res = await fetch(url, { method: "PUT", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
   return res.ok ? { ok: true, message: "Saved to your AIOS notes." } : { ok: false, message: "I couldn't save that note." };
+}
+
+// ── AIOS activity log ────────────────────────────────────────────────────────
+// Records what the AIOS handled (e.g. closing an @aios task) to a GitHub file so
+// the morning brief can report "here's what I took care of." Exported so any
+// channel/session can log a handled item. Never throws — logging must not break
+// the action it records.
+export async function logAiosActivity(text) {
+  try {
+    if (!GITHUB_TOKEN || !text) return;
+    const path = "context/aios-activity.md";
+    const url = `https://api.github.com/repos/${REPO}/contents/${path}`;
+    const headers = { Authorization: `token ${GITHUB_TOKEN}`, Accept: "application/vnd.github.v3+json" };
+    let existing = "# AIOS Activity Log\n\nWhat the AIOS has handled. The morning brief reads recent entries.\n", sha;
+    const meta = await fetch(url, { headers });
+    if (meta.ok) { const j = await meta.json(); sha = j.sha; existing = Buffer.from(j.content, "base64").toString("utf8"); }
+    const d = new Date(new Date().toLocaleString("en-US", { timeZone: CALENDAR_TZ }));
+    const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const updated = existing.replace(/\s*$/, "") + `\n- [${stamp}] ${text}\n`;
+    const body = { message: "AIOS activity", content: Buffer.from(updated).toString("base64") };
+    if (sha) body.sha = sha;
+    await fetch(url, { method: "PUT", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  } catch (_) { /* never break the action */ }
 }
 
 // ── Email ───────────────────────────────────────────────────────────────────
