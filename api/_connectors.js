@@ -217,7 +217,14 @@ export async function listEvents({ days = 7 } = {}) {
   const now = new Date();
   const end = new Date(now.getTime() + days * 864e5);
   const events = [];
-  for (const cal of calendars.slice(0, 8)) {
+  // Read EVERY iCloud calendar that holds events (Home, Music, Acting, etc.) —
+  // not just the first few. Skip task-only calendars (VTODO/Reminders). The
+  // CalDAV connection is iCloud-only, so Gmail calendars are excluded already.
+  const eventCals = calendars.filter((cal) => {
+    const comps = (cal.components || []).map((x) => String(x).toUpperCase());
+    return comps.length === 0 || comps.includes("VEVENT");
+  });
+  for (const cal of eventCals) {
     try {
       const objs = await c.fetchCalendarObjects({ calendar: cal, timeRange: { start: now.toISOString(), end: end.toISOString() } });
       for (const o of objs) {
@@ -237,8 +244,8 @@ export async function listEvents({ days = 7 } = {}) {
   }
   events.sort((a, b) => a.ts - b.ts);
   if (!events.length) return { ok: true, data: [], message: `Nothing on your calendar in the next ${days} days.` };
-  const top = events.slice(0, 6).map((e) => `${e.summary} on ${e.label}`);
-  const more = events.length > 6 ? ` Plus ${events.length - 6} more.` : "";
+  const top = events.slice(0, 8).map((e) => `${e.summary} on ${e.label}`);
+  const more = events.length > 8 ? ` Plus ${events.length - 8} more.` : "";
   return { ok: true, data: events, message: `You have ${events.length} event${events.length === 1 ? "" : "s"} coming up: ${top.join("; ")}.${more}` };
 }
 
