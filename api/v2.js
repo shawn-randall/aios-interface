@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 // Shared capability layer — same connectors the voice + SMS channels use.
-import { addTask as cAddTask, listTasks as cListTasks, completeTask as cCompleteTask, addEvent as cAddEvent, listEvents as cListEvents, saveNote as cSaveNote, readEmail as cReadEmail, sendEmail as cSendEmail } from "./_connectors.js";
+import { addTask as cAddTask, listTasks as cListTasks, completeTask as cCompleteTask, addEvent as cAddEvent, listEvents as cListEvents, listCalendars as cListCalendars, saveNote as cSaveNote, readEmail as cReadEmail, sendEmail as cSendEmail } from "./_connectors.js";
 // Same access-control layer voice + SMS use. Web is Shawn's private deployment,
 // so the role is always owner — but routing through resolveRole keeps the gate
 // uniform across every channel (defense in depth; SMS will reuse it verbatim).
@@ -181,6 +181,11 @@ const TOOLS = [
     },
   },
   {
+    name: "list_calendars",
+    description: "List the names of Shawn's calendars (Home, Music, Acting, etc.). Use when he asks what calendars he has, or which calendars exist — e.g. before adding an event to a specific one.",
+    input_schema: { type: "object", properties: {}, required: [] },
+  },
+  {
     name: "add_event",
     description: "Add an event to Shawn's calendar. Use when he asks to schedule, book, or add something.",
     input_schema: {
@@ -226,6 +231,7 @@ async function executeTool(name, input, savedFiles) {
   if (name === "add_task")     return (await cAddTask(input)).message;
   if (name === "complete_task") return (await cCompleteTask({ task_name: input.task_name })).message;
   if (name === "list_events")  return (await cListEvents({ days: input.days })).message;
+  if (name === "list_calendars") return (await cListCalendars()).message;
   if (name === "add_event")    return (await cAddEvent(input)).message;
   if (name === "save_note")    return (await cSaveNote({ note: input.note })).message;
 

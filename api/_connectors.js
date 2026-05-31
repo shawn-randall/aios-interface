@@ -255,6 +255,21 @@ export async function listEvents({ days = 7 } = {}) {
   return { ok: true, data: events, message: `You have ${events.length} event${events.length === 1 ? "" : "s"} coming up: ${top.join("; ")}.${more}` };
 }
 
+export async function listCalendars() {
+  const c = await caldavClient();
+  const calendars = await c.fetchCalendars();
+  // Only event calendars (skip VTODO/Reminders). iCloud-only, so no Gmail cals.
+  const names = calendars
+    .filter((cal) => {
+      const comps = (cal.components || []).map((x) => String(x).toUpperCase());
+      return comps.length === 0 || comps.includes("VEVENT");
+    })
+    .map((cal) => cal.displayName)
+    .filter(Boolean);
+  if (!names.length) return { ok: true, data: [], message: "I couldn't find any calendars." };
+  return { ok: true, data: names, message: `You have ${names.length} calendars: ${names.join(", ")}.` };
+}
+
 export async function saveNote({ note } = {}) {
   note = (note || "").trim();
   if (!note) return { ok: false, message: "What should I note down?" };
