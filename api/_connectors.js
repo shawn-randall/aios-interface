@@ -187,6 +187,105 @@ export async function completeTask({ task_name } = {}) {
   return { ok: true, data: { completed: done }, message };
 }
 
+// ── Calendar helpers (shared by add / move / delete) ─────────────────────────
+// Single source for building an event, so add and move produce identical events.
+function buildVEvent({ title, date, time, durationMins = 60, allDay = false }) {
+  const uid = `aios-${Date.now()}-${Math.floor(Math.random() * 1e4)}@shawn`;
+  const nowUtc = new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15) + "Z";
+  const head = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//AIOS//EN", "BEGIN:VEVENT", `UID:${uid}`, `DTSTAMP:${nowUtc}`];
+  let body;
+  if (allDay) {
+    const [y, m, dy] = date.split("-");
+    const nd = new Date(date + "T00:00:00Z"); nd.setUTCDate(nd.getUTCDate() + 1);
+    const dend = `${nd.getUTCFullYear()}${pad(nd.getUTCMonth() + 1)}${pad(nd.getUTCDate())}`;
+    body = [`DTSTART;VALUE=DATE:${y}${m}${dy}`, `DTEND;VALUE=DATE:${dend}`];
+  } else {
+    const timeStr = time || "12:00";
+    const fmtLocal = (d, t) => { const [y, m, dy] = d.split("-"); const [h, mn] = t.split(":"); return `${y}${m}${dy}T${h}${mn}00`; };
+    const [sh, sm] = timeStr.split(":").map(Number);
+    const tot = sh * 60 + sm + durationMins;
+    const endTime = `${pad(Math.floor(tot / 60) % 24)}:${pad(tot % 60)}`;
+    body = [`DTSTART;TZID=America/New_York:${fmtLocal(date, timeStr)}`, `DTEND;TZID=America/New_York:${fmtLocal(date, endTime)}`];
+  }
+  const iCalString = [...head, ...body, `SUMMARY:${title}`, "END:VEVENT", "END:VCALENDAR"].join("\r\n");
+  return { uid, iCalString };
+}
+
+// Parse a spoken date/time phrase, reporting whether a DATE and/or TIME were
+// actually specified — so a move keeps the original date when only the time
+// changes (and vice-versa).
+function parseWhenParts(phrase) {
+  try {
+    const ref = new Date(new Date().toLocaleString("en-US", { timeZone: CALENDAR_TZ }));
+    const r = chrono.parse(phrase || "", ref, { forwardDate: true });
+    if (!r || !r.length) return { date: null, time: null, hasDate: false, hasTime: false };
+    const s = r[0].start;
+    const hasDate = s.isCertain("day") || s.isCertain("month") || s.isCertain("weekday");
+    const hasTime = s.isCertain("hour");
+    const y = s.get("year"), mo = s.get("month"), d = s.get("day");
+    const date = (y && mo && d) ? `${y}-${pad(mo)}-${pad(d)}` : null;
+    const time = hasTime ? `${pad(s.get("hour"))}:${pad(s.get("minute") || 0)}` : null;
+    return { date, time, hasDate, hasTime };
+  } catch (_) {
+    return { date: null, time: null, hasDate: false, hasTime: false };
+  }
+}
+
+// Extract start/end + duration from an event's iCal data.
+function eventTimes(data) {
+  data = (data || "").replace(/\r\n[ \t]/g, "").replace(/\n[ \t]/g, "");
+  const parse = (s) => {
+    const m = (s || "").replace(/\s/g, "").match(/(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2}))?/);
+    if (!m) return null;
+    const [, y, mo, d, h, mi] = m;
+    return { date: `${y}-${mo}-${d}`, time: h ? `${h}:${mi}` : null };
+  };
+  const s = parse((data.match(/DTSTART[^:]*:(.*)/) || [])[1]);
+  const e = parse((data.match(/DTEND[^:]*:(.*)/) || [])[1]);
+  let durMins = 60;
+  if (s && e && s.time && e.time) {
+    const [sh, sm] = s.time.split(":").map(Number);
+    const [eh, em] = e.time.split(":").map(Number);
+    durMins = eh * 60 + em - (sh * 60 + sm);
+    if (durMins <= 0) durMins = 60;
+  }
+  return { start: s, end: e, durMins, allDay: !(s && s.time) };
+}
+
+// Find events matching a title across all event calendars. Optional dayPhrase
+// narrows to a specific day. Carries the CalDAV object so callers can delete/move.
+async function findEvents(c, title, dayPhrase) {
+  const calendars = await c.fetchCalendars();
+  const eventCals = calendars.filter((cal) => {
+    const comps = (cal.components || []).map((x) => String(x).toUpperCase());
+    return comps.length === 0 || comps.includes("VEVENT");
+  });
+  const start = new Date(Date.now() - 7 * 864e5);
+  const end = new Date(Date.now() + 120 * 864e5);
+  const q = (title || "").toLowerCase();
+  const wantDate = dayPhrase ? resolveWhen(dayPhrase).date : null;
+  const matches = [];
+  for (const cal of eventCals) {
+    try {
+      const objs = await c.fetchCalendarObjects({ calendar: cal, timeRange: { start: start.toISOString(), end: end.toISOString() } });
+      for (const o of objs) {
+        const data = (o.data || "").replace(/\r\n[ \t]/g, "").replace(/\n[ \t]/g, "");
+        let summary = (data.match(/SUMMARY:(.*)/) || [])[1]?.trim() || "";
+        summary = summary.replace(/\\,/g, ",").replace(/\\;/g, ";").replace(/\\n/gi, " ").replace(/\\\\/g, "\\");
+        if (!summary.toLowerCase().includes(q)) continue;
+        const dt = (data.match(/DTSTART[^:]*:(.*)/) || [])[1]?.trim() || "";
+        const m = dt.replace(/\s/g, "").match(/(\d{4})(\d{2})(\d{2})/);
+        const isoDate = m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+        const label = isoDate ? new Date(isoDate + "T00:00:00Z").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" }) : "";
+        matches.push({ obj: o, data, summary, isoDate, label, cal: cal.displayName });
+      }
+    } catch (_) {}
+  }
+  let scoped = wantDate ? matches.filter((x) => x.isoDate === wantDate) : matches;
+  if (!scoped.length) scoped = matches;
+  return scoped;
+}
+
 export async function addEvent({ title, when, calendar_name, duration_mins = 60 } = {}) {
   title = (title || "").trim();
   if (!title) return { ok: false, message: "What should I call the event?" };
@@ -202,21 +301,8 @@ export async function addEvent({ title, when, calendar_name, duration_mins = 60 
     return { ok: false, message: `I couldn't find a calendar called "${calendar_name}". Your calendars: ${names}. Which one?` };
   }
 
-  const timeStr = time || "12:00";
-  const fmtLocal = (d, t) => { const [y, m, dy] = d.split("-"); const [h, mn] = t.split(":"); return `${y}${m}${dy}T${h}${mn}00`; };
-  const [sh, sm] = timeStr.split(":").map(Number);
-  const tot = sh * 60 + sm + duration_mins;
-  const endTime = `${pad(Math.floor(tot / 60) % 24)}:${pad(tot % 60)}`;
-  const uid = `aios-${Date.now()}@shawn`;
-  const nowUtc = new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15) + "Z";
-  const vcal = [
-    "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//AIOS//EN", "BEGIN:VEVENT",
-    `UID:${uid}`, `DTSTAMP:${nowUtc}`,
-    `DTSTART;TZID=America/New_York:${fmtLocal(date, timeStr)}`,
-    `DTEND;TZID=America/New_York:${fmtLocal(date, endTime)}`,
-    `SUMMARY:${title}`, "END:VEVENT", "END:VCALENDAR",
-  ].join("\r\n");
-  await c.createCalendarObject({ calendar: cal, filename: `${uid}.ics`, iCalString: vcal });
+  const { uid, iCalString } = buildVEvent({ title, date, time, durationMins: duration_mins });
+  await c.createCalendarObject({ calendar: cal, filename: `${uid}.ics`, iCalString });
 
   const spoken = new Date(date + "T00:00:00Z").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" });
   return { ok: true, data: { date, time, calendar: cal.displayName }, message: `Added "${title}" on ${spoken}${time ? ` at ${time}` : ""}, to your ${cal.displayName || "default"} calendar.` };
@@ -264,37 +350,7 @@ export async function deleteEvent({ title, when } = {}) {
   title = (title || "").trim();
   if (!title) return { ok: false, message: "Which event should I remove?" };
   const c = await caldavClient();
-  const calendars = await c.fetchCalendars();
-  const eventCals = calendars.filter((cal) => {
-    const comps = (cal.components || []).map((x) => String(x).toUpperCase());
-    return comps.length === 0 || comps.includes("VEVENT");
-  });
-  // Search a generous window (last week through ~4 months out).
-  const start = new Date(Date.now() - 7 * 864e5);
-  const end = new Date(Date.now() + 120 * 864e5);
-  const q = title.toLowerCase();
-  const wantDate = when ? resolveWhen(when).date : null;
-  const matches = [];
-  for (const cal of eventCals) {
-    try {
-      const objs = await c.fetchCalendarObjects({ calendar: cal, timeRange: { start: start.toISOString(), end: end.toISOString() } });
-      for (const o of objs) {
-        const data = (o.data || "").replace(/\r\n[ \t]/g, "").replace(/\n[ \t]/g, "");
-        let summary = (data.match(/SUMMARY:(.*)/) || [])[1]?.trim() || "";
-        summary = summary.replace(/\\,/g, ",").replace(/\\;/g, ";").replace(/\\n/gi, " ").replace(/\\\\/g, "\\");
-        if (!summary.toLowerCase().includes(q)) continue;
-        const dt = (data.match(/DTSTART[^:]*:(.*)/) || [])[1]?.trim() || "";
-        const m = dt.replace(/\s/g, "").match(/(\d{4})(\d{2})(\d{2})/);
-        const isoDate = m ? `${m[1]}-${m[2]}-${m[3]}` : null;
-        const label = isoDate ? new Date(isoDate + "T00:00:00Z").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" }) : "";
-        matches.push({ obj: o, summary, isoDate, label, cal: cal.displayName });
-      }
-    } catch (_) {}
-  }
-  // If a date was given, prefer events on that day to disambiguate.
-  let scoped = wantDate ? matches.filter((x) => x.isoDate === wantDate) : matches;
-  if (!scoped.length) scoped = matches;
-
+  const scoped = await findEvents(c, title, when);
   if (!scoped.length) return { ok: false, message: `I couldn't find an event matching "${title}".` };
   if (scoped.length > 1) {
     const list = scoped.slice(0, 5).map((x) => `${x.summary} on ${x.label}`).join("; ");
@@ -303,6 +359,61 @@ export async function deleteEvent({ title, when } = {}) {
   const t = scoped[0];
   await c.deleteCalendarObject({ calendarObject: t.obj });
   return { ok: true, data: { summary: t.summary, date: t.isoDate, calendar: t.cal }, message: `Removed "${t.summary}"${t.label ? ` on ${t.label}` : ""} from your ${t.cal} calendar.` };
+}
+
+// Move/reschedule an event. CRITICAL: preserves the event's original calendar,
+// time, and duration — only what Shawn names changes. Say a new time → keeps the
+// date; say a new day → keeps the time; say a calendar → moves it (otherwise it
+// stays put). The delete-old/create-new is an implementation detail, never
+// surfaced to the user.
+export async function moveEvent({ title, when, from_when, calendar_name } = {}) {
+  title = (title || "").trim();
+  if (!title) return { ok: false, message: "Which event should I move?" };
+  if (!when || !when.trim()) return { ok: false, message: "When should I move it to?" };
+  const c = await caldavClient();
+  const scoped = await findEvents(c, title, from_when);
+  if (!scoped.length) return { ok: false, message: `I couldn't find an event matching "${title}".` };
+  if (scoped.length > 1) {
+    const list = scoped.slice(0, 5).map((x) => `${x.summary} on ${x.label}`).join("; ");
+    return { ok: false, message: `I found ${scoped.length} events matching that: ${list}. Which day's should I move?` };
+  }
+  const ev = scoped[0];
+  const orig = eventTimes(ev.data);
+  const parts = parseWhenParts(when);
+  if (!parts.hasDate && !parts.hasTime) return { ok: false, message: "What day or time should I move it to?" };
+
+  // Keep what wasn't named: original date if only a time was given, and vice-versa.
+  const newDate = parts.hasDate && parts.date ? parts.date : (orig.start && orig.start.date);
+  if (!newDate) return { ok: false, message: "I couldn't work out the new date for that event." };
+  const newTime = parts.hasTime && parts.time ? parts.time : (orig.start && orig.start.time);
+  const keepAllDay = orig.allDay && !parts.hasTime;
+
+  // Preserve the original calendar unless explicitly asked to change it.
+  const calendars = await c.fetchCalendars();
+  let targetCal = calendars.find((x) => x.displayName === ev.cal);
+  if (calendar_name) {
+    const picked = pickCalendar(calendars, calendar_name);
+    if (!picked) {
+      const names = calendars.map((x) => x.displayName).filter(Boolean).join(", ");
+      return { ok: false, message: `I couldn't find a calendar called "${calendar_name}". Your calendars: ${names}.` };
+    }
+    targetCal = picked;
+  }
+  if (!targetCal) targetCal = pickCalendar(calendars, ev.cal) || calendars[0];
+
+  // Create the moved event FIRST, then remove the original — so a failure can
+  // never lose the event (worst case is a duplicate, which is recoverable).
+  const { uid, iCalString } = buildVEvent({ title: ev.summary, date: newDate, time: newTime, durationMins: orig.durMins || 60, allDay: keepAllDay });
+  await c.createCalendarObject({ calendar: targetCal, filename: `${uid}.ics`, iCalString });
+  await c.deleteCalendarObject({ calendarObject: ev.obj });
+
+  const spoken = new Date(newDate + "T00:00:00Z").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" });
+  let pretty = "";
+  if (!keepAllDay && newTime) {
+    const [h, mn] = newTime.split(":");
+    pretty = ` at ${((+h % 12) || 12)}${mn !== "00" ? ":" + mn : ""}${+h >= 12 ? "pm" : "am"}`;
+  }
+  return { ok: true, data: { date: newDate, time: newTime, calendar: targetCal.displayName }, message: `Moved "${ev.summary}" to ${spoken}${pretty}, on your ${targetCal.displayName} calendar.` };
 }
 
 export async function listCalendars() {

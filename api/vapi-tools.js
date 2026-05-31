@@ -8,7 +8,7 @@
 // register the schema in scripts/aios_vapi.py, then `sync`.
 
 import {
-  addTask, listTasks, completeTask, addEvent, deleteEvent, listEvents, listCalendars, saveNote,
+  addTask, listTasks, completeTask, addEvent, deleteEvent, moveEvent, listEvents, listCalendars, saveNote,
   leaveMessage, requestCallback, requestCalendarHold, publicInfo,
 } from "./_connectors.js";
 import { resolveRole, isToolAllowed, verifyOwnerSecret, issueSessionToken } from "./_roles.js";
@@ -23,6 +23,7 @@ const TOOLS = {
   complete_task: completeTask,
   add_event: addEvent,
   delete_event: deleteEvent,
+  move_event: moveEvent,
   get_schedule: ({ days } = {}) => listEvents({ days }),
   list_calendars: listCalendars,
   save_note: saveNote,

@@ -124,6 +124,7 @@ export const OWNER_TOOLS = new Set([
   "complete_task",
   "add_event",
   "delete_event",
+  "move_event",
   "list_events",
   "get_schedule",
   "list_calendars",

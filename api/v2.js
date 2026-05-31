@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 // Shared capability layer — same connectors the voice + SMS channels use.
-import { addTask as cAddTask, listTasks as cListTasks, completeTask as cCompleteTask, addEvent as cAddEvent, deleteEvent as cDeleteEvent, listEvents as cListEvents, listCalendars as cListCalendars, saveNote as cSaveNote, readEmail as cReadEmail, sendEmail as cSendEmail } from "./_connectors.js";
+import { addTask as cAddTask, listTasks as cListTasks, completeTask as cCompleteTask, addEvent as cAddEvent, deleteEvent as cDeleteEvent, moveEvent as cMoveEvent, listEvents as cListEvents, listCalendars as cListCalendars, saveNote as cSaveNote, readEmail as cReadEmail, sendEmail as cSendEmail } from "./_connectors.js";
 // Same access-control layer voice + SMS use. Web is Shawn's private deployment,
 // so the role is always owner — but routing through resolveRole keeps the gate
 // uniform across every channel (defense in depth; SMS will reuse it verbatim).
@@ -203,6 +203,20 @@ const TOOLS = [
     },
   },
   {
+    name: "move_event",
+    description: "Move/reschedule an existing event to a new time and/or day. Use when Shawn says to move, reschedule, push, or change the time of an event. The event KEEPS its original calendar, time, and length unless he explicitly changes them — only what he names changes. Don't delete-and-recreate; just call this.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "The event to move, as Shawn refers to it." },
+        when: { type: "string", description: "The NEW time and/or day, exactly as Shawn said it — 'to 5pm' (keeps the day), 'to Friday' (keeps the time), 'to Friday at 5pm'. Don't compute the date." },
+        from_when: { type: "string", description: "The event's CURRENT day, only if needed to disambiguate when several events share the title. Omit otherwise." },
+        calendar_name: { type: "string", description: "ONLY set this if Shawn explicitly asks to move the event to a different calendar. Otherwise omit — the event stays on its current calendar." },
+      },
+      required: ["title", "when"],
+    },
+  },
+  {
     name: "add_event",
     description: "Add an event to Shawn's calendar. Use when he asks to schedule, book, or add something.",
     input_schema: {
@@ -251,6 +265,7 @@ async function executeTool(name, input, savedFiles) {
   if (name === "list_calendars") return (await cListCalendars()).message;
   if (name === "add_event")    return (await cAddEvent(input)).message;
   if (name === "delete_event") return (await cDeleteEvent({ title: input.title, when: input.when })).message;
+  if (name === "move_event")   return (await cMoveEvent(input)).message;
   if (name === "save_note")    return (await cSaveNote({ note: input.note })).message;
 
   if (name === "read_email")   return (await cReadEmail({ account: input.account, count: input.count })).message;
