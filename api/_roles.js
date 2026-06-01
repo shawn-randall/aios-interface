@@ -46,6 +46,12 @@ function normPin(p) {
 }
 
 // ── auth config ──────────────────────────────────────────────────────────────
+// Owner phone number(s) — used for the SMS channel only. Texts come from a
+// single number (no merged-call/speaker problem voice had), so the sender's
+// number is a reasonable owner signal. Voice still requires the codeword/PIN.
+const OWNER_NUMBERS = new Set(
+  (process.env.OWNER_NUMBERS || "").split(",").map((s) => normalizeNumber(s)).filter(Boolean)
+);
 const OWNER_PIN = normPin(process.env.OWNER_PIN || "");
 const OWNER_CODEWORD = normWord(process.env.OWNER_CODEWORD || "");
 const AUTH_MODE = (process.env.OWNER_AUTH_MODE || "any").toLowerCase();
@@ -135,12 +141,20 @@ export const OWNER_TOOLS = new Set([
   ...GUEST_TOOLS,
 ]);
 
-// Resolve a caller's role. Number never grants owner anymore — only a valid,
-// in-call session token does (web is the trusted private deployment).
-export function resolveRole({ channel, sessionToken, callId } = {}) {
+// Resolve a caller's role.
+//  - web:   trusted private deployment → owner.
+//  - sms:   owner if the text comes from a known owner number (sender number is
+//           the identity for 1:1 texts; voice's merged-call risk doesn't apply).
+//  - voice: owner ONLY via a valid in-call session token (codeword/PIN handshake).
+// Fails closed: anything unrecognized → guest.
+export function resolveRole({ channel, callerNumber, sessionToken, callId } = {}) {
   if (channel === "web") return "owner";
+  if (channel === "sms") {
+    const num = normalizeNumber(callerNumber);
+    return num && OWNER_NUMBERS.has(num) ? "owner" : "guest";
+  }
   if (verifySessionToken(sessionToken, callId)) return "owner";
-  return "guest"; // fail closed
+  return "guest";
 }
 
 export function isToolAllowed(role, toolName) {
