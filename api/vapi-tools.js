@@ -11,7 +11,7 @@ import {
   addTask, listTasks, completeTask, addEvent, deleteEvent, moveEvent, listEvents, listCalendars, saveNote,
   leaveMessage, requestCallback, requestCalendarHold, publicInfo,
 } from "./_connectors.js";
-import { resolveRole, isToolAllowed, verifyOwnerSecret, issueSessionToken } from "./_roles.js";
+import { resolveRole, isToolAllowed, unlockChallenge, issueSessionToken } from "./_roles.js";
 
 // name → connector. Owner tools + guest (receptionist) tools both live here;
 // _roles.js decides which the current caller may actually run, and the handler
@@ -66,8 +66,19 @@ export default async function handler(req, res) {
     // unlock_owner is the handshake door — verify the secret(s) here and, on
     // success, mint a call-scoped token. The MODEL never decides owner-ness.
     if (name === "unlock_owner") {
-      const ok = verifyOwnerSecret({ pin: toolArgs.pin, passphrase: toolArgs.passphrase });
-      if (ok) {
+      // The SERVER owns the policy (OWNER_AUTH_MODE) and drives the handshake.
+      // The model just relays what the server asks for — so flipping the mode
+      // changes the conversation with no prompt/code edits (modular for resale).
+      const c = unlockChallenge({ pin: toolArgs.pin, passphrase: toolArgs.passphrase });
+      if (c.status === "disabled") {
+        result = `OWNER_UNLOCK_DISABLED. Owner mode is turned off for this account. Tell the caller owner access is unavailable right now and offer to take a message. Do NOT ask for a PIN or codeword.`;
+      } else if (c.status === "challenge") {
+        const ask = c.missing
+          .map((m) => (m === "pin" ? "enter their PIN on the keypad and press pound" : "say their codeword"))
+          .join(c.mode === "all" ? " AND " : " or ");
+        const note = c.mode === "all" ? "This account requires BOTH factors." : "Either one is enough.";
+        result = `UNLOCK_CHALLENGE. ${note} Ask the caller to ${ask}. Then call unlock_owner again with what they provide. Do not reveal whether any earlier factor was correct.`;
+      } else if (c.status === "granted") {
         const token = issueSessionToken(callId);
         result = `OWNER_ACCESS_GRANTED. session_token=${token}. Say only: "You're unlocked." Attach this session_token to every owner action for the rest of this call. NEVER say the token aloud.`;
       } else {

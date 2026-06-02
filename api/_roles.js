@@ -90,6 +90,39 @@ export function verifyOwnerSecret({ pin, passphrase } = {}) {
   return Boolean(pinOk || wordOk);
 }
 
+// ── Server-driven unlock policy ──────────────────────────────────────────────
+// The mode (OWNER_AUTH_MODE) lives only here, in config. A channel asks the
+// server "what now?" and the SERVER — not the model — dictates the handshake:
+// what to collect (one factor, both, or none) and whether to grant. The agent
+// stays mode-agnostic, so the SAME code adapts to whatever each client/instance
+// configures (any / all / off) with zero code changes — the resale seam.
+//
+// Oracle-safe: the "challenge" is computed from the PRESENCE of factors, never
+// their correctness, so we never reveal which secret was right. Correctness is
+// judged only once enough factors are present, and all-or-nothing.
+//   → { status: "disabled" | "challenge" | "granted" | "denied", mode, missing? }
+export function unlockChallenge({ pin, passphrase } = {}) {
+  const methods = enabledMethods();
+  if (AUTH_MODE === "off" || methods.length === 0) {
+    return { status: "disabled", mode: AUTH_MODE };
+  }
+  const present = (m) => {
+    const v = m === "pin" ? pin : passphrase;
+    return v != null && String(v).trim() !== "";
+  };
+  const missing =
+    AUTH_MODE === "all"
+      ? methods.filter((m) => !present(m)) // every configured factor required
+      : methods.some(present) ? [] : methods; // any: at least one
+  if (missing.length) {
+    return { status: "challenge", mode: AUTH_MODE, missing };
+  }
+  return {
+    status: verifyOwnerSecret({ pin, passphrase }) ? "granted" : "denied",
+    mode: AUTH_MODE,
+  };
+}
+
 // ── call-scoped session tokens (stateless, non-forgeable) ────────────────────
 function sign(payload) {
   return crypto.createHmac("sha256", AUTH_SECRET).update(payload).digest("base64url");
