@@ -13,6 +13,87 @@ import {
 } from "./_connectors.js";
 import { resolveRole, isToolAllowed, unlockChallenge, issueSessionToken } from "./_roles.js";
 
+// ── Outbound calling (owner: "call X and ask Y, then call me back") ───────────
+// Same loop proven by scripts/aios_outbound_call.py (Matt Park test), now cloud-
+// driven so Daisy can trigger it by voice. Identity is config-driven (ethos).
+const VAPI_KEY       = process.env.VAPI_API_KEY;                    // set in Vercel
+const OWNER_CALLBACK = process.env.OWNER_CALLBACK_NUMBER;           // Shawn's cell, set in Vercel
+const OUT_PHONE_ID   = "82f23c4f-1e0b-4320-aab6-258875c34a8e";      // Twilio (646) line = caller ID
+const OUT_ASSISTANT  = "23850e1c-b0c6-4ea5-89fd-dbcd0e5a8917";      // AIOS assistant
+const OUT_NAME       = process.env.ASSISTANT_NAME || "Daisy";        // config knob (productization)
+const OUT_WEBHOOK    = "https://aios-interface-jet.vercel.app/api/vapi-tools";
+const OUT_MAXSEC     = 600;
+const OUT_VM_DETECT  = { provider: "vapi", type: "audio", beepMaxAwaitSeconds: 30 };
+
+async function vapiPlaceCall(payload) {
+  if (!VAPI_KEY) return null;
+  try {
+    const r = await fetch("https://api.vapi.ai/call", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${VAPI_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return r.ok ? await r.json() : null;
+  } catch { return null; }
+}
+
+// Call the CONTACT, ask the question, and route the end-of-call report back here.
+async function startOutboundCall({ contact_name, contact_number, question } = {}) {
+  if (!VAPI_KEY || !OWNER_CALLBACK) return "Outbound calling isn't fully set up yet — Shawn needs to finish the config.";
+  if (!contact_number || !question)  return "I need a phone number to call and a question to ask.";
+  const who = contact_name || "them";
+  const objective =
+    `You are ${OUT_NAME}, Shawn Randall's personal AI assistant, making a brief outbound call on his behalf. ` +
+    `You are an AI assistant — never pretend to be Shawn. Be warm and concise. Introduce yourself, then ask exactly this: ` +
+    `"${question}". Listen, confirm the answer back, thank them, and end the call. If you reach a voicemail, leave the voicemail message.`;
+  await vapiPlaceCall({
+    phoneNumberId: OUT_PHONE_ID,
+    customer: { number: contact_number },
+    assistantId: OUT_ASSISTANT,
+    metadata: { aiosOutbound: "ask", contactName: who, question },
+    assistantOverrides: {
+      firstMessage: `Hi! This is ${OUT_NAME}, Shawn Randall's assistant, calling on his behalf — do you have a quick moment?`,
+      model: { provider: "openai", model: "gpt-4.1", messages: [{ role: "system", content: objective }] },
+      maxDurationSeconds: OUT_MAXSEC,
+      voicemailDetection: OUT_VM_DETECT,
+      voicemailMessage: `Hi, this is ${OUT_NAME}, Shawn Randall's assistant. Shawn asked me to reach you with a quick question. Please give us a call back when you can. Thank you so much!`,
+      server: { url: OUT_WEBHOOK },
+      serverMessages: ["end-of-call-report"],
+      analysisPlan: { structuredDataPlan: { enabled: true, schema: { type: "object", properties: {
+        reached_person: { type: "boolean", description: "Did a live person answer (vs voicemail)?" },
+        answer: { type: "string", description: "Answer to Shawn's question in 1-2 sentences; empty if not obtained." },
+      } } } },
+    },
+  });
+  return `Okay, I'm calling ${who} now to ask that. I'll call you right back with what they say.`;
+}
+
+// CONTACT call ended → call Shawn back with the captured answer (voicemail fallback).
+async function deliverOutboundResult(msg) {
+  const meta = msg.call?.metadata || msg.metadata || {};
+  if (meta.aiosOutbound !== "ask" || !OWNER_CALLBACK) return;
+  const sd = msg.analysis?.structuredData || msg.call?.analysis?.structuredData || {};
+  const answer = (sd.answer || "").trim();
+  const who = meta.contactName || "them";
+  const result = (msg.endedReason === "voicemail" || !answer)
+    ? `I couldn't reach ${who}, so I left a voicemail asking them to call back.`
+    : `I reached ${who}. They said: ${answer}`;
+  await vapiPlaceCall({
+    phoneNumberId: OUT_PHONE_ID,
+    customer: { number: OWNER_CALLBACK },
+    assistantId: OUT_ASSISTANT,
+    metadata: { aiosOutbound: "deliver" },
+    assistantOverrides: {
+      firstMessage: `Hey Shawn, it's ${OUT_NAME} with an update. ${result}`,
+      model: { provider: "openai", model: "gpt-4.1", messages: [{ role: "system", content:
+        `You are ${OUT_NAME}, Shawn's assistant, calling Shawn to deliver the result of a call you made for him. Greet him, deliver the update clearly, ask if there's anything else, then end. Keep it brief.` }] },
+      maxDurationSeconds: OUT_MAXSEC,
+      voicemailDetection: OUT_VM_DETECT,
+      voicemailMessage: `Hey Shawn, it's ${OUT_NAME}. ${result} Talk soon!`,
+    },
+  });
+}
+
 // name → connector. Owner tools + guest (receptionist) tools both live here;
 // _roles.js decides which the current caller may actually run, and the handler
 // refuses the rest. Keep these names in sync with the allow-lists in _roles.js.
@@ -45,6 +126,12 @@ export default async function handler(req, res) {
   const calls = msg.toolCallList || msg.toolCalls || msg.toolCallsList || [];
   const callId = msg.call?.id || msg.callId || null; // binds the session token to THIS call
   const callerNumber = msg.call?.customer?.number || msg.customer?.number || null; // caller ID, captured automatically
+
+  // Outbound follow-up: a contact call we placed has ended → call Shawn back with the answer.
+  if (msg.type === "end-of-call-report") {
+    await deliverOutboundResult(msg);
+    return res.status(200).json({ received: true });
+  }
 
   const results = [];
   for (const call of calls) {
@@ -90,6 +177,16 @@ export default async function handler(req, res) {
 
     // THE GATE. Owner only via a valid in-call token; else guest (fail closed).
     const role = resolveRole({ channel: "voice", sessionToken, callId });
+
+    // call_someone — owner-only outbound call (place call → auto call Shawn back).
+    if (name === "call_someone") {
+      result = role === "owner"
+        ? await startOutboundCall(toolArgs)
+        : "I can only place calls for Shawn once he's unlocked owner mode.";
+      results.push({ toolCallId: id, result });
+      continue;
+    }
+
     const connector = TOOLS[name];
     if (!connector) {
       result = `Unknown tool: ${name}`;

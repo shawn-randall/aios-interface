@@ -171,6 +171,7 @@ export const OWNER_TOOLS = new Set([
   "save_context",
   "read_email",
   "send_email",
+  "call_someone",   // owner-only: place an outbound call on Shawn's behalf, then call him back
   ...GUEST_TOOLS,
 ]);
 
