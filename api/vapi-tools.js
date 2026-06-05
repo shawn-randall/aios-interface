@@ -22,6 +22,7 @@ const OWNER_CALLBACK = process.env.OWNER_CALLBACK_NUMBER;           // Shawn's c
 const OUT_PHONE_ID   = "82f23c4f-1e0b-4320-aab6-258875c34a8e";      // Twilio (646) line = caller ID
 const OUT_ASSISTANT  = "23850e1c-b0c6-4ea5-89fd-dbcd0e5a8917";      // AIOS assistant
 const OUT_NAME       = process.env.ASSISTANT_NAME || "Daisy";        // config knob (productization)
+const REC_NOTICE     = process.env.RECORDING_NOTICE || "";           // config knob: "this call may be recorded"; empty = off
 const OUT_WEBHOOK    = "https://aios-interface-jet.vercel.app/api/vapi-tools";
 const OUT_MAXSEC     = 600;
 const OUT_VM_DETECT  = { provider: "vapi", type: "audio", beepMaxAwaitSeconds: 30 };
@@ -53,7 +54,7 @@ async function startOutboundCall({ contact_name, contact_number, question } = {}
     assistantId: OUT_ASSISTANT,
     metadata: { aiosOutbound: "ask", contactName: who, question },
     assistantOverrides: {
-      firstMessage: `Hi! This is ${OUT_NAME}, Shawn Randall's assistant, calling on his behalf — do you have a quick moment?`,
+      firstMessage: `Hi! This is ${OUT_NAME}, Shawn Randall's assistant, calling on his behalf.${REC_NOTICE ? " " + REC_NOTICE : ""} Do you have a quick moment?`,
       model: { provider: "openai", model: "gpt-4.1", messages: [{ role: "system", content: objective }] },
       maxDurationSeconds: OUT_MAXSEC,
       voicemailDetection: OUT_VM_DETECT,
