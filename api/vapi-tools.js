@@ -12,7 +12,7 @@ import {
   leaveMessage, requestCallback, requestCalendarHold, publicInfo,
 } from "./_connectors.js";
 import { resolveRole, isToolAllowed, unlockChallenge, issueSessionToken } from "./_roles.js";
-import { supabaseReady, upsertContact, updateContact, getContactByPhone, insertInteraction, getOpenOutbound, markResolved } from "./_supabase.js";
+import { supabaseReady, upsertContact, updateContact, getContactByPhone, insertInteraction, getOpenOutbound, markResolved, getMessages, archiveInteraction } from "./_supabase.js";
 
 // ── Outbound calling (owner: "call X and ask Y, then call me back") ───────────
 // Same loop proven by scripts/aios_outbound_call.py (Matt Park test), now cloud-
@@ -126,6 +126,7 @@ async function captureInboundCall(msg) {
   const sd = msg.analysis?.structuredData || msg.call?.analysis?.structuredData || {};
   const summary = (msg.analysis?.summary || msg.call?.analysis?.summary || "").trim();
   const vapiCallId = msg.call?.id || null;
+  const recordingUrl = msg.artifact?.recordingUrl || msg.call?.artifact?.recordingUrl || null;
   const verbatim = (sd.verbatim_message || sd.message || "").trim();
   const sentiment = (sd.sentiment || "").trim();
   const cname = (sd.caller_name || "").trim();
@@ -143,17 +144,40 @@ async function captureInboundCall(msg) {
       contact = await updateContact(contact.id, { first_name: first || null, last_name: last || null, name_confirmed: nameConfirmed }) || contact;
     }
     if (contact?.id) {
-      await insertInteraction({ contact_id: contact.id, direction: "inbound", channel: "voice", vapi_call_id: vapiCallId, summary, verbatim, sentiment });
+      await insertInteraction({ contact_id: contact.id, direction: "inbound", channel: "voice", vapi_call_id: vapiCallId, summary, verbatim, sentiment, recording_url: recordingUrl });
       const open = await getOpenOutbound(contact.id);   // returning our call? close the loop.
       if (open) await markResolved(open.id);
     }
   } catch {}
-  // Surface the EXACT record in Todoist (verbatim + transcript link), best-effort.
+  // Surface the EXACT record in Todoist (verbatim + ▶ listen + transcript link), best-effort.
   if (verbatim || summary) {
     const who = cname || "a caller";
+    const listen = recordingUrl ? ` — ▶ listen: ${recordingUrl}` : "";
     const link = vapiCallId ? ` — transcript: https://dashboard.vapi.ai/calls/${vapiCallId}` : "";
-    try { await addTask({ content: `📞 Call recap — ${who}: ${verbatim || summary}${sentiment ? ` (${sentiment})` : ""}${link}`, labels: ["aios"] }); } catch {}
+    try { await addTask({ content: `📞 Call recap — ${who}: ${verbatim || summary}${sentiment ? ` (${sentiment})` : ""}${listen}${link}`, labels: ["aios"] }); } catch {}
   }
+}
+
+// Voicemail box (owner-only): read back stored messages, and soft-delete them.
+async function listMessages({ kind } = {}) {
+  if (!supabaseReady()) return "The message store isn't set up yet.";
+  const k = (kind || "inbound").toLowerCase();
+  const msgs = await getMessages({ kind: k });
+  if (!msgs.length) return `No ${k === "all" ? "" : k + " "}messages right now — the box is empty.`;
+  const lines = msgs.map((m, i) => {
+    const c = m.contacts || {};
+    const who = [c.first_name, c.last_name].filter(Boolean).join(" ") || "an unknown caller";
+    const when = new Date(m.created_at).toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const what = (m.verbatim || m.summary || "(no message left)").slice(0, 400);
+    return `${i + 1}) From ${who} on ${when}: "${what}" [id=${m.id}${m.recording_url ? " has_audio=yes" : ""}]`;
+  });
+  return `There ${msgs.length === 1 ? "is 1 message" : `are ${msgs.length} messages`}. Read them to Shawn ONE AT A TIME, newest first. After each, ask if he wants to delete it, hear the audio, or move to the next. When he says delete, call archive_message with that message's id. NEVER read an id aloud.\n${lines.join("\n")}`;
+}
+
+async function archiveMessage({ message_id } = {}) {
+  if (!message_id) return "I'm not sure which message to delete — let's go through them and you can tell me which one.";
+  const r = await archiveInteraction(message_id);
+  return r === null ? "Hmm, I couldn't delete that one — want me to try again?" : "Done — deleted that message.";
 }
 
 // name → connector. Owner tools + guest (receptionist) tools both live here;
@@ -256,6 +280,16 @@ export default async function handler(req, res) {
         : "I can only place calls for Shawn once he's unlocked owner mode.";
       results.push({ toolCallId: id, result });
       continue;
+    }
+
+    // Voicemail box — owner-only.
+    if (name === "list_messages") {
+      result = role === "owner" ? await listMessages(toolArgs) : "I can only read Shawn's messages once he's unlocked owner mode.";
+      results.push({ toolCallId: id, result }); continue;
+    }
+    if (name === "archive_message") {
+      result = role === "owner" ? await archiveMessage(toolArgs) : "I can only delete messages once Shawn's unlocked owner mode.";
+      results.push({ toolCallId: id, result }); continue;
     }
 
     const connector = TOOLS[name];

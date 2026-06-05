@@ -93,3 +93,21 @@ export async function markResolved(interactionId) {
   if (!interactionId) return null;
   return sb("PATCH", `interactions?id=eq.${interactionId}`, { body: { resolved: true } });
 }
+
+// Voicemail box: fetch non-archived messages (default inbound), newest first,
+// with the contact's name embedded. kind = "inbound" | "outbound" | "all".
+export async function getMessages({ kind = "inbound", limit = 10 } = {}) {
+  const dir = (kind === "outbound" || kind === "all") ? kind : "inbound";
+  const dirFilter = dir === "all" ? "" : `&direction=eq.${dir}`;
+  const out = await sb("GET",
+    `interactions?owner_id=eq.${OWNER}&archived=eq.false${dirFilter}` +
+    `&order=created_at.desc&limit=${limit}` +
+    `&select=id,direction,created_at,verbatim,summary,sentiment,recording_url,contacts(first_name,last_name)`);
+  return Array.isArray(out) ? out : [];
+}
+
+// Soft-delete: hide a message from the box. Row + Vapi recording are kept.
+export async function archiveInteraction(id) {
+  if (!id) return null;
+  return sb("PATCH", `interactions?id=eq.${id}`, { body: { archived: true } });
+}
