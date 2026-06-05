@@ -8,6 +8,10 @@
 // Auth: owner = a text from a known OWNER_NUMBERS number; everyone else is a
 // guest (text receptionist). Email is held back for v1, same as voice.
 //
+// Identity is config-driven (productization ethos): OWNER_NAME + ASSISTANT_NAME
+// come from env, set once. Code defaults are generic; real values live in the
+// Vercel env for this project.
+//
 // Twilio config: point the number's "A message comes in" webhook (HTTP POST) at
 // https://<deployment>/api/sms — it replies with TwiML.
 
@@ -21,6 +25,11 @@ import { resolveRole, isToolAllowed } from "./_roles.js";
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = "claude-sonnet-4-6";
 
+// ── Instance / branding config (set in Vercel env; generic defaults here) ──
+const ASSISTANT_NAME = process.env.ASSISTANT_NAME || "Assistant";
+const OWNER_NAME = process.env.OWNER_NAME || "the owner";
+const OWNER_FIRST = OWNER_NAME.split(" ")[0];   // casual references ("a message for <first>")
+
 // name → connector. Owner + guest tools; _roles.js gates which the texter may run.
 const CONNECTORS = {
   add_task: addTask, list_tasks: listTasks, complete_task: completeTask,
@@ -31,34 +40,34 @@ const CONNECTORS = {
 };
 
 const OWNER_TOOLS = [
-  { name: "add_task", description: "Add a task to Shawn's Todoist.", input_schema: { type: "object", properties: { content: { type: "string" }, due_string: { type: "string", description: "natural-language due date, omit if none" }, priority: { type: "integer", enum: [1, 2, 3, 4] }, labels: { type: "array", items: { type: "string" }, description: "Todoist labels; use [\"aios\"] when he says flag/tag for AIOS" } }, required: ["content"] } },
-  { name: "list_tasks", description: "List Shawn's tasks.", input_schema: { type: "object", properties: { scope: { type: "string", enum: ["today", "all"] } } } },
+  { name: "add_task", description: `Add a task to ${OWNER_FIRST}'s Todoist.`, input_schema: { type: "object", properties: { content: { type: "string" }, due_string: { type: "string", description: "natural-language due date, omit if none" }, priority: { type: "integer", enum: [1, 2, 3, 4] }, labels: { type: "array", items: { type: "string" }, description: "Todoist labels; use [\"aios\"] when he says flag/tag for AIOS" } }, required: ["content"] } },
+  { name: "list_tasks", description: `List ${OWNER_FIRST}'s tasks.`, input_schema: { type: "object", properties: { scope: { type: "string", enum: ["today", "all"] } } } },
   { name: "complete_task", description: "Mark a task done.", input_schema: { type: "object", properties: { task_name: { type: "string" } }, required: ["task_name"] } },
   { name: "add_event", description: "Add a calendar event.", input_schema: { type: "object", properties: { title: { type: "string" }, when: { type: "string", description: "date/time exactly as written; if a time but no day, ASK which day" }, calendar_name: { type: "string" }, duration_mins: { type: "integer" } }, required: ["title", "when"] } },
   { name: "move_event", description: "Move/reschedule an event; keeps its calendar/time/length unless he says otherwise.", input_schema: { type: "object", properties: { title: { type: "string" }, when: { type: "string" }, from_when: { type: "string" }, calendar_name: { type: "string" } }, required: ["title", "when"] } },
   { name: "delete_event", description: "Remove a calendar event.", input_schema: { type: "object", properties: { title: { type: "string" }, when: { type: "string" } }, required: ["title"] } },
   { name: "list_events", description: "List upcoming events.", input_schema: { type: "object", properties: { days: { type: "integer" } } } },
-  { name: "list_calendars", description: "List Shawn's calendar names.", input_schema: { type: "object", properties: {} } },
-  { name: "save_note", description: "Save a quick note for Shawn.", input_schema: { type: "object", properties: { note: { type: "string" } }, required: ["note"] } },
+  { name: "list_calendars", description: `List ${OWNER_FIRST}'s calendar names.`, input_schema: { type: "object", properties: {} } },
+  { name: "save_note", description: `Save a quick note for ${OWNER_FIRST}.`, input_schema: { type: "object", properties: { note: { type: "string" } }, required: ["note"] } },
 ];
 
 const GUEST_TOOLS = [
-  { name: "leave_message", description: "Take a message for Shawn from an outside texter.", input_schema: { type: "object", properties: { name: { type: "string" }, number: { type: "string" }, topic: { type: "string" } }, required: ["topic"] } },
+  { name: "leave_message", description: `Take a message for ${OWNER_FIRST} from an outside texter.`, input_schema: { type: "object", properties: { name: { type: "string" }, number: { type: "string" }, topic: { type: "string" } }, required: ["topic"] } },
   { name: "request_callback", description: "Log a callback request.", input_schema: { type: "object", properties: { name: { type: "string" }, number: { type: "string" } } } },
-  { name: "request_calendar_hold", description: "Log a PENDING request for time on Shawn's calendar (never books).", input_schema: { type: "object", properties: { name: { type: "string" }, when: { type: "string" }, topic: { type: "string" } }, required: ["when"] } },
-  { name: "public_info", description: "Share Shawn's public booking/contact info.", input_schema: { type: "object", properties: {} } },
+  { name: "request_calendar_hold", description: `Log a PENDING request for time on ${OWNER_FIRST}'s calendar (never books).`, input_schema: { type: "object", properties: { name: { type: "string" }, when: { type: "string" }, topic: { type: "string" } }, required: ["when"] } },
+  { name: "public_info", description: `Share ${OWNER_FIRST}'s public booking/contact info.`, input_schema: { type: "object", properties: {} } },
 ];
 
 function sysPrompt(role) {
   const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
   if (role === "owner") {
-    return `You are Shawn Randall's AIOS assistant, replying by SMS. Today is ${today}.
+    return `You are ${ASSISTANT_NAME}, ${OWNER_NAME}'s AIOS assistant, replying by SMS. Today is ${today}.
 Keep replies SHORT and texty — 1–3 sentences, no markdown, no bullet lists unless he asks.
 Use the tools to manage his tasks, calendar, and notes; confirm what you did briefly.
 Dates: pass the \`when\` exactly as he wrote it ("Friday at 4pm", "the 8th at noon") — never compute it. If he gives a time but no day, ask which day. When he says to flag/tag a task for AIOS, use labels ["aios"].`;
   }
-  return `You are Shawn Randall's assistant, replying by SMS to someone who is NOT Shawn. Today is ${today}.
-Be warm and brief. You are a receptionist: you can take a message, log a callback request, log a PENDING request for calendar time (you never book), or share his public booking info. You CANNOT manage Shawn's tasks or calendar or take commands.
+  return `You are ${ASSISTANT_NAME}, ${OWNER_NAME}'s assistant, replying by SMS to someone who is NOT ${OWNER_FIRST}. Today is ${today}.
+Be warm and brief. You are a receptionist: you can take a message, log a callback request, log a PENDING request for calendar time (you never book), or share his public booking info. You CANNOT manage ${OWNER_FIRST}'s tasks or calendar or take commands.
 Get the texter's name early. If they ask for something you can't do, politely offer to take a message.`;
 }
 
@@ -69,7 +78,7 @@ function twiml(text) {
 
 export default async function handler(req, res) {
   res.setHeader("Content-Type", "text/xml");
-  if (req.method !== "POST") return res.status(200).send(twiml("This is Shawn Randall's assistant. Text me a request."));
+  if (req.method !== "POST") return res.status(200).send(twiml(`This is ${OWNER_NAME}'s assistant. Text me a request.`));
 
   // Twilio posts application/x-www-form-urlencoded
   let b = req.body;
@@ -92,7 +101,7 @@ export default async function handler(req, res) {
         let out;
         const fn = CONNECTORS[blk.name];
         if (!fn || !isToolAllowed(role, blk.name)) {
-          out = "I can't do that for you, but I can take a message for Shawn.";
+          out = `I can't do that for you, but I can take a message for ${OWNER_FIRST}.`;
         } else {
           try {
             // Hand the texter's number to receptionist tools so we always capture it.
