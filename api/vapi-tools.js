@@ -12,7 +12,7 @@ import {
   leaveMessage, requestCallback, requestCalendarHold, publicInfo,
 } from "./_connectors.js";
 import { resolveRole, isToolAllowed, unlockChallenge, issueSessionToken } from "./_roles.js";
-import { supabaseReady, upsertContact, getContactByPhone, insertInteraction, getOpenOutbound, markResolved } from "./_supabase.js";
+import { supabaseReady, upsertContact, updateContact, getContactByPhone, insertInteraction, getOpenOutbound, markResolved } from "./_supabase.js";
 
 // ── Outbound calling (owner: "call X and ask Y, then call me back") ───────────
 // Same loop proven by scripts/aios_outbound_call.py (Matt Park test), now cloud-
@@ -129,10 +129,20 @@ async function captureInboundCall(msg) {
   const verbatim = (sd.verbatim_message || sd.message || "").trim();
   const sentiment = (sd.sentiment || "").trim();
   const cname = (sd.caller_name || "").trim();
+  const nameConfirmed = sd.name_confirmed === true;   // did the caller verify the spelling this call?
   const [first, ...rest] = cname.split(" ");
+  const last = rest.join(" ");
   try {
-    const contact = await upsertContact({ first_name: first || undefined, last_name: rest.join(" ") || undefined, phone: callerNumber });
-    if (contact) {
+    let contact = await getContactByPhone(callerNumber);
+    if (!contact) {
+      // brand-new caller — store the name + whether they confirmed the spelling
+      contact = await upsertContact({ first_name: first || undefined, last_name: last || undefined, phone: callerNumber, name_confirmed: nameConfirmed });
+    } else if (cname && !contact.name_confirmed && (nameConfirmed || !contact.first_name)) {
+      // known caller whose name isn't locked yet: update ONLY if they just confirmed
+      // the spelling, or we never had a name. A confirmed name is never clobbered.
+      contact = await updateContact(contact.id, { first_name: first || null, last_name: last || null, name_confirmed: nameConfirmed }) || contact;
+    }
+    if (contact?.id) {
       await insertInteraction({ contact_id: contact.id, direction: "inbound", channel: "voice", vapi_call_id: vapiCallId, summary, verbatim, sentiment });
       const open = await getOpenOutbound(contact.id);   // returning our call? close the loop.
       if (open) await markResolved(open.id);

@@ -42,7 +42,7 @@ async function sb(method, path, { body, prefer } = {}) {
 }
 
 // Insert-or-update a contact by (owner_id, phone). Returns the row, or null.
-export async function upsertContact({ first_name, last_name, phone, email, notes } = {}) {
+export async function upsertContact({ first_name, last_name, phone, email, notes, name_confirmed } = {}) {
   const p = normalizePhone(phone);
   if (!p) return null;
   const row = { owner_id: OWNER, phone: p, updated_at: new Date().toISOString() };
@@ -50,8 +50,20 @@ export async function upsertContact({ first_name, last_name, phone, email, notes
   if (last_name) row.last_name = last_name;
   if (email) row.email = email;
   if (notes) row.notes = notes;
+  if (typeof name_confirmed === "boolean") row.name_confirmed = name_confirmed;
   const out = await sb("POST", "contacts?on_conflict=owner_id,phone", {
     body: row, prefer: "resolution=merge-duplicates,return=representation",
+  });
+  return Array.isArray(out) ? out[0] || null : out;
+}
+
+// Update specific fields on an existing contact (used to fix/confirm a name
+// without touching anything else). Returns the row, or null.
+export async function updateContact(id, fields = {}) {
+  if (!id) return null;
+  const out = await sb("PATCH", `contacts?id=eq.${id}`, {
+    body: { ...fields, updated_at: new Date().toISOString() },
+    prefer: "return=representation",
   });
   return Array.isArray(out) ? out[0] || null : out;
 }
