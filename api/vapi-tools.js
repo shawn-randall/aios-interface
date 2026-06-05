@@ -12,6 +12,7 @@ import {
   leaveMessage, requestCallback, requestCalendarHold, publicInfo,
 } from "./_connectors.js";
 import { resolveRole, isToolAllowed, unlockChallenge, issueSessionToken } from "./_roles.js";
+import { supabaseReady, upsertContact, getContactByPhone, insertInteraction, getOpenOutbound, markResolved } from "./_supabase.js";
 
 // ── Outbound calling (owner: "call X and ask Y, then call me back") ───────────
 // Same loop proven by scripts/aios_outbound_call.py (Matt Park test), now cloud-
@@ -46,7 +47,7 @@ async function startOutboundCall({ contact_name, contact_number, question } = {}
     `You are ${OUT_NAME}, Shawn Randall's personal AI assistant, making a brief outbound call on his behalf. ` +
     `You are an AI assistant — never pretend to be Shawn. Be warm and concise. Introduce yourself, then ask exactly this: ` +
     `"${question}". Listen, confirm the answer back, thank them, and end the call. If you reach a voicemail, leave the voicemail message.`;
-  await vapiPlaceCall({
+  const call = await vapiPlaceCall({
     phoneNumberId: OUT_PHONE_ID,
     customer: { number: contact_number },
     assistantId: OUT_ASSISTANT,
@@ -65,6 +66,12 @@ async function startOutboundCall({ contact_name, contact_number, question } = {}
       } } } },
     },
   });
+  // Persist the open question so a callback can recall it (best-effort; no-ops if Supabase off).
+  try {
+    const [first, ...rest] = (contact_name || "").trim().split(" ");
+    const contact = await upsertContact({ first_name: first || undefined, last_name: rest.join(" ") || undefined, phone: contact_number });
+    if (contact) await insertInteraction({ contact_id: contact.id, direction: "outbound", channel: "voice", vapi_call_id: call?.id, outbound_question: question, resolved: false });
+  } catch {}
   return `Okay, I'm calling ${who} now to ask that. I'll call you right back with what they say.`;
 }
 
@@ -92,6 +99,50 @@ async function deliverOutboundResult(msg) {
       voicemailMessage: `Hey Shawn, it's ${OUT_NAME}. ${result} Talk soon!`,
     },
   });
+}
+
+// recall_caller — at the start of an inbound call, look up THIS caller's record +
+// the newest open question Shawn asked them, so the receptionist greets by name and
+// can re-ask. Returns a short instruction string the model acts on.
+async function recallCaller(caller_id) {
+  if (!supabaseReady() || !caller_id) return "NO_MEMORY. No record for this caller — greet normally and offer to help.";
+  const contact = await getContactByPhone(caller_id);
+  if (!contact) return "NO_MEMORY. No record for this caller — greet normally and offer to help.";
+  const first = contact.first_name || "";
+  const name = [contact.first_name, contact.last_name].filter(Boolean).join(" ");
+  const open = await getOpenOutbound(contact.id);
+  if (open && open.outbound_question) {
+    return `KNOWN_CALLER name="${name}". OPEN_QUESTION: Shawn recently called them to ask: "${open.outbound_question}". They are likely returning that call. Greet ${first || "them"} warmly by name, mention Shawn had a question, then ask it and capture their answer.`;
+  }
+  return `KNOWN_CALLER name="${name}". No open question. Greet ${first || "them"} warmly by name and ask how you can help.`;
+}
+
+// Inbound call ended → persist the verbatim message + sentiment + a Vapi transcript
+// link (what a paraphrase loses), and close any open outbound question they answered.
+async function captureInboundCall(msg) {
+  const callerNumber = msg.call?.customer?.number || null;
+  if (!callerNumber) return;
+  const sd = msg.analysis?.structuredData || msg.call?.analysis?.structuredData || {};
+  const summary = (msg.analysis?.summary || msg.call?.analysis?.summary || "").trim();
+  const vapiCallId = msg.call?.id || null;
+  const verbatim = (sd.verbatim_message || sd.message || "").trim();
+  const sentiment = (sd.sentiment || "").trim();
+  const cname = (sd.caller_name || "").trim();
+  const [first, ...rest] = cname.split(" ");
+  try {
+    const contact = await upsertContact({ first_name: first || undefined, last_name: rest.join(" ") || undefined, phone: callerNumber });
+    if (contact) {
+      await insertInteraction({ contact_id: contact.id, direction: "inbound", channel: "voice", vapi_call_id: vapiCallId, summary, verbatim, sentiment });
+      const open = await getOpenOutbound(contact.id);   // returning our call? close the loop.
+      if (open) await markResolved(open.id);
+    }
+  } catch {}
+  // Surface the EXACT record in Todoist (verbatim + transcript link), best-effort.
+  if (verbatim || summary) {
+    const who = cname || "a caller";
+    const link = vapiCallId ? ` — transcript: https://dashboard.vapi.ai/calls/${vapiCallId}` : "";
+    try { await addTask({ content: `📞 Call recap — ${who}: ${verbatim || summary}${sentiment ? ` (${sentiment})` : ""}${link}`, labels: ["aios"] }); } catch {}
+  }
 }
 
 // name → connector. Owner tools + guest (receptionist) tools both live here;
@@ -129,7 +180,9 @@ export default async function handler(req, res) {
 
   // Outbound follow-up: a contact call we placed has ended → call Shawn back with the answer.
   if (msg.type === "end-of-call-report") {
-    await deliverOutboundResult(msg);
+    const meta = msg.call?.metadata || msg.metadata || {};
+    if (meta.aiosOutbound === "ask") await deliverOutboundResult(msg);   // a contact call WE placed
+    else if (!meta.aiosOutbound) await captureInboundCall(msg);          // someone called US
     return res.status(200).json({ received: true });
   }
 
@@ -149,6 +202,13 @@ export default async function handler(req, res) {
     toolArgs.caller_id = callerNumber;
 
     let result;
+
+    // recall_caller — safe for any caller: looks up only THIS caller's own record.
+    if (name === "recall_caller") {
+      result = await recallCaller(callerNumber);
+      results.push({ toolCallId: id, result });
+      continue;
+    }
 
     // unlock_owner is the handshake door — verify the secret(s) here and, on
     // success, mint a call-scoped token. The MODEL never decides owner-ness.
