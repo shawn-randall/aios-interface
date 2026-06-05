@@ -123,6 +123,9 @@ async function recallCaller(caller_id) {
 async function captureInboundCall(msg) {
   const callerNumber = msg.call?.customer?.number || null;
   if (!callerNumber) return;
+  // The owner's own calls aren't voicemails — don't log them as messages.
+  const OWNER_NUMS = (process.env.OWNER_NUMBERS || "").split(",").map((s) => s.replace(/\D/g, "")).filter(Boolean);
+  if (OWNER_NUMS.includes(String(callerNumber).replace(/\D/g, ""))) return;
   const sd = msg.analysis?.structuredData || msg.call?.analysis?.structuredData || {};
   const summary = (msg.analysis?.summary || msg.call?.analysis?.summary || "").trim();
   const vapiCallId = msg.call?.id || null;
