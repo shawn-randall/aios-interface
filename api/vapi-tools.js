@@ -183,6 +183,24 @@ async function archiveMessage({ message_id } = {}) {
   return r === null ? "Hmm, I couldn't delete that one — want me to try again?" : "Done — deleted that message.";
 }
 
+// draft_broadcast — owner-only: compose an email to Shawn's Kit list as a DRAFT.
+// NEVER sends — Shawn reviews + sends in Kit (so a voice mishear can't blast the list).
+const KIT_API_KEY = process.env.KIT_API_KEY;
+async function draftBroadcast({ subject, body } = {}) {
+  if (!KIT_API_KEY) return "The email list isn't connected yet — Shawn needs to add the Kit key in Vercel.";
+  if (!subject || !body) return "I need a subject and a short message to draft the broadcast.";
+  const html = "<p>" + String(body).trim().replace(/\n{2,}/g, "</p><p>").replace(/\n/g, "<br>") + "</p>";
+  try {
+    const r = await fetch("https://api.kit.com/v4/broadcasts", {
+      method: "POST",
+      headers: { "X-Kit-Api-Key": KIT_API_KEY, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ subject, content: html, description: "Drafted by Daisy" }),
+    });
+    if (!r.ok) return "I couldn't create that draft — the email tool returned an error.";
+    return `Done — I saved "${subject}" as a draft in Kit. Give it a look and hit send when you're ready; I left it as a draft so nothing goes out until you say so.`;
+  } catch { return "I couldn't reach the email tool to draft that."; }
+}
+
 // name → connector. Owner tools + guest (receptionist) tools both live here;
 // _roles.js decides which the current caller may actually run, and the handler
 // refuses the rest. Keep these names in sync with the allow-lists in _roles.js.
@@ -292,6 +310,10 @@ export default async function handler(req, res) {
     }
     if (name === "archive_message") {
       result = role === "owner" ? await archiveMessage(toolArgs) : "I can only delete messages once Shawn's unlocked owner mode.";
+      results.push({ toolCallId: id, result }); continue;
+    }
+    if (name === "draft_broadcast") {
+      result = role === "owner" ? await draftBroadcast(toolArgs) : "I can only draft broadcasts once Shawn's unlocked owner mode.";
       results.push({ toolCallId: id, result }); continue;
     }
 
