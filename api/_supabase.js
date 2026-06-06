@@ -13,7 +13,7 @@
 
 const URL = process.env.SUPABASE_URL;            // https://<ref>.supabase.co
 const KEY = process.env.SUPABASE_SERVICE_KEY;    // service_role secret (server-only)
-const OWNER = process.env.OWNER_ID || "owner";   // per-tenant key (generic default)
+const OWNER = (process.env.OWNER_ID || "owner").trim();   // per-tenant key; .trim() guards against stray whitespace in env vars
 
 export function supabaseReady() {
   return Boolean(URL && KEY);
