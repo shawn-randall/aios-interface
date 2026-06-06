@@ -158,10 +158,11 @@ function pickCalendar(calendars, calendarName) {
 
 // ── CAPABILITIES ────────────────────────────────────────────────────────────
 
-export async function addTask({ content, due_string, priority, labels } = {}) {
+export async function addTask({ content, due_string, priority, labels, description } = {}) {
   content = (content || "").trim();
   if (!content) return { ok: false, message: "What should the task say?" };
   const body = { content };
+  if (description) body.description = description;
   if (due_string) body.due_string = due_string;
   if (priority) body.priority = priority;
   if (labels && labels.length) {

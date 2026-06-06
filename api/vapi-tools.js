@@ -201,6 +201,20 @@ async function draftBroadcast({ subject, body } = {}) {
   } catch { return "I couldn't reach the email tool to draft that."; }
 }
 
+// draft_patreon_post — owner-only: write a Patreon post in Shawn's voice and save it
+// to his tasks to paste + publish (Patreon's API can't publish, so we hand him the text).
+async function draftPatreonPost({ title, body } = {}) {
+  if (!body) return "What should the Patreon post be about? Give me the gist and I'll write it.";
+  const r = await addTask({
+    content: `📝 Patreon post: ${title || "(draft)"}`,
+    description: `${title ? title + "\n\n" : ""}${body}\n\n— copy into Patreon and publish.`,
+    labels: ["aios"],
+  });
+  return r?.ok
+    ? "Done — I wrote your Patreon post and saved it to your tasks. Open it, copy it into Patreon, and hit publish whenever you're ready."
+    : "I wrote it but couldn't save it — want me to try again?";
+}
+
 // name → connector. Owner tools + guest (receptionist) tools both live here;
 // _roles.js decides which the current caller may actually run, and the handler
 // refuses the rest. Keep these names in sync with the allow-lists in _roles.js.
@@ -314,6 +328,10 @@ export default async function handler(req, res) {
     }
     if (name === "draft_broadcast") {
       result = role === "owner" ? await draftBroadcast(toolArgs) : "I can only draft broadcasts once Shawn's unlocked owner mode.";
+      results.push({ toolCallId: id, result }); continue;
+    }
+    if (name === "draft_patreon_post") {
+      result = role === "owner" ? await draftPatreonPost(toolArgs) : "I can only draft Patreon posts once Shawn's unlocked owner mode.";
       results.push({ toolCallId: id, result }); continue;
     }
 
