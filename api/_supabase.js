@@ -111,3 +111,11 @@ export async function archiveInteraction(id) {
   if (!id) return null;
   return sb("PATCH", `interactions?id=eq.${id}`, { body: { archived: true } });
 }
+
+// Link-in-bio analytics: log a pageview or a link click (owned funnel data).
+export async function insertLinkEvent({ type, label, referrer } = {}) {
+  return sb("POST", "link_events", {
+    body: { owner_id: OWNER, type: type || null, label: label || null, referrer: referrer || null },
+    prefer: "return=minimal",
+  });
+}
